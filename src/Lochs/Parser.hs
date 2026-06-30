@@ -35,20 +35,21 @@ instance Monad Parser where
           Left d         -> Left d
           Right (a, cs') -> runParser (f a) cs'
 
-parseError :: Int -> String -> Parser a
-parseError line message = Parser $ \_ -> Left $ mkDiagnostic line "" message
+parseError :: Int -> String -> String -> Parser a
+parseError line loc message = Parser $ \_ -> Left $ mkDiagnostic line loc message
 
 unexpectedToken :: Token -> Either TokenType String -> Parser a
-unexpectedToken got expected = parseError (line got) message
+unexpectedToken got expected = parseError (line got) loc message
     where message = "Unexpected token, got " ++ show (ty got)
                     ++ " but expected " ++ expected'
+          loc = " at " ++ show (lexeme got)
           expected' = case expected of
             Left tt -> show tt
             Right s -> s
 
 item :: Parser Token
 item = Parser $ \case
-    []   -> Left $ mkDiagnostic 0 "" "Unexpected end of file"
+    []   -> Left $ mkDiagnostic 0 " at end" "Expected token"
     c:cs -> Right (c, cs)
 
 peek :: Parser (Maybe Token)
@@ -60,7 +61,7 @@ token :: TokenType -> Parser Token
 token tt = do
     tok <- peek
     case tok of
-      Nothing -> parseError 0 ("Unexpected end of file, expected " ++ show tt)
+      Nothing -> parseError 0 " at end" ("Expected " ++ show tt)
       Just tok'
         | ty tok' == tt -> item
         | otherwise     -> unexpectedToken tok' (Left tt)
@@ -139,7 +140,7 @@ unary = do
 
 primary :: Parser Expr
 primary = peek >>= \case
-    Nothing -> parseError 0 "Unexpected end of file"
+    Nothing -> parseError 0 " at end" "Expected token"
     Just tok -> case ty tok of
         TTrue     -> item >> pure (Literal (VBool True))
         TFalse    -> item >> pure (Literal (VBool False))
