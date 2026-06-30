@@ -86,7 +86,7 @@ synchronize = peek >>= \case
 requireEOF :: Parser a -> Parser a
 requireEOF p = do
     val <- p
-    token TEOF
+    _ <- token TEOF
     pure val
 
 expression :: Parser Expr
