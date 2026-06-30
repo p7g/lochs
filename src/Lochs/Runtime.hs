@@ -1,4 +1,4 @@
-module Lochs.Runtime (Value(..), isEqual, isTruthy, stringify) where
+module Lochs.Runtime (Value(..), isEqual, isTruthy, stringify, typeName) where
 
 data Value = VBool   !Bool
            | VNumber !Double
@@ -12,6 +12,13 @@ instance Show Value where
         VNumber n -> show n
         VString s -> s
         VNil      -> "nil"
+
+typeName :: Value -> String
+typeName = \case
+    VBool   _ -> "boolean"
+    VNumber _ -> "number"
+    VString _ -> "string"
+    VNil      -> "nil"
 
 stringify :: Value -> String
 stringify = \case

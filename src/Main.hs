@@ -48,6 +48,6 @@ run code = do
             traverse_ (putStrLn . show) ds
             pure True
         Right e -> do
-            let v = eval e
-            putStrLn $ show v
-            pure False
+            case eval e of
+              Left d  -> putStrLn (show d) >> pure True
+              Right v -> putStrLn (show v) >> pure False
