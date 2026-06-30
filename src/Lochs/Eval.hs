@@ -33,6 +33,7 @@ binary  line BinSub (VNumber _) r           = typeError line r "number"
 binary  line BinSub l           (VNumber _) = typeError line l "number"
 binary  line BinSub l           _           = typeError line l "number"
 
+binary  line BinDiv (VNumber _) (VNumber 0) = Left $ mkDiagnostic line "" "Division by zero"
 binary _line BinDiv (VNumber l) (VNumber r) = Right $ VNumber (l / r)
 binary  line BinDiv (VNumber _) r           = typeError line r "number"
 binary  line BinDiv l           (VNumber _) = typeError line l "number"
