@@ -15,11 +15,11 @@ common warnings
 executable lochs
     import:           warnings
     main-is:          Main.hs
-    other-modules:    Lochs.Scanner
+    other-modules:    Lochs.AST
                     , Lochs.Diagnostic
-                    , Lochs.AST
+                    , Lochs.Parser
                     , Lochs.Runtime
-                    , Lochs.Pretty
+                    , Lochs.Scanner
     build-depends:    base ^>=4.22.0.0
     hs-source-dirs:   src
     default-language: GHC2024

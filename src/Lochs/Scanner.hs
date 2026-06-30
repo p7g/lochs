@@ -1,4 +1,4 @@
-module Lochs.Scanner (Token(..), scan) where
+module Lochs.Scanner (Token(..), TokenType(..), scan) where
 
 import Data.Char (isAlpha, isAlphaNum, isAscii, isDigit)
 import Data.Maybe (fromMaybe)
@@ -22,7 +22,7 @@ data TokenType
     | Print | Return | Super | This | True_ | Var | While
 
     | Eof
-    deriving (Show)
+    deriving (Eq, Show)
 
 data Token = Token { ty :: TokenType
                    , lexeme :: String

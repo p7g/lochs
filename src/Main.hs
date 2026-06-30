@@ -7,6 +7,7 @@ import System.Exit (ExitCode(ExitFailure), exitWith)
 import System.IO (hFlush, hPutStrLn, stderr, stdout)
 import System.IO.Error (catchIOError, isEOFError)
 
+import Lochs.Parser (parse)
 import Lochs.Scanner (scan)
 
 main :: IO ()
@@ -37,6 +38,14 @@ runPrompt = catchIOError loop handler
 run :: String -> IO Bool
 run code = do
     let (tokens, diagnostics) = scan code
-    traverse_ (putStrLn . show) diagnostics
-    traverse_ (putStrLn . show) tokens
-    return $ not (null diagnostics)
+    case diagnostics of
+      d:ds -> do
+        traverse_ (putStrLn . show) (d:ds)
+        pure True
+      _ -> case parse tokens of
+        Left ds -> do
+            traverse_ (putStrLn . show) ds
+            pure True
+        Right e -> do
+            putStrLn $ show e
+            pure False
