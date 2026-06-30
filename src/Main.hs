@@ -7,6 +7,7 @@ import System.Exit (ExitCode(ExitFailure), exitWith)
 import System.IO (hFlush, hPutStrLn, stderr, stdout)
 import System.IO.Error (catchIOError, isEOFError)
 
+import Lochs.Eval (eval)
 import Lochs.Parser (parse)
 import Lochs.Scanner (scan)
 
@@ -47,5 +48,6 @@ run code = do
             traverse_ (putStrLn . show) ds
             pure True
         Right e -> do
-            putStrLn $ show e
+            let v = eval e
+            putStrLn $ show v
             pure False

@@ -108,7 +108,7 @@ binary tts next = next >>= loop
               Nothing -> pure lhs
               Just op' -> do
                 rhs <- next
-                let lhs' = Binary lhs (binop op') rhs
+                let lhs' = Binary (line op') lhs (binop op') rhs
                 loop lhs'
 
 equality :: Parser Expr
@@ -136,20 +136,21 @@ unary = do
         Nothing -> primary
         Just op' -> do
             rhs <- unary
-            pure $ Unary (unop op') rhs
+            pure $ Unary (line op') (unop op') rhs
 
 primary :: Parser Expr
 primary = peek >>= \case
     Nothing -> parseError 0 " at end" "Expected token"
     Just tok -> case ty tok of
-        TTrue     -> item >> pure (Literal (VBool True))
-        TFalse    -> item >> pure (Literal (VBool False))
-        TNil       -> item >> pure (Literal VNil)
-        TNumber n  -> item >> pure (Literal (VNumber n))
-        TString s -> item >> pure (Literal (VString s))
+        TTrue      -> item >> pure (Literal l (VBool True))
+        TFalse     -> item >> pure (Literal l (VBool False))
+        TNil       -> item >> pure (Literal l VNil)
+        TNumber n  -> item >> pure (Literal l (VNumber n))
+        TString s  -> item >> pure (Literal l (VString s))
         TLeftParen -> do
             _ <- token TLeftParen
             expr <- expression
             _ <- token TRightParen
-            pure $ Grouping expr
+            pure $ Grouping l expr
         _          -> unexpectedToken tok (Right "expression")
+      where l = line tok

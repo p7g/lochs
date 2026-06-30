@@ -8,15 +8,19 @@ data BinaryOp = BinAdd
               | BinDiv
               | BinEq
               | BinNe
+              | BinGt
+              | BinGte
+              | BinLt
+              | BinLte
     deriving (Show)
 
 data UnaryOp = UnaryNeg | UnaryNot
     deriving (Show)
 
-data Expr = Binary Expr BinaryOp Expr
-          | Grouping Expr
-          | Literal R.Value
-          | Unary UnaryOp Expr
+data Expr = Binary   Int Expr BinaryOp Expr
+          | Grouping Int Expr
+          | Literal  Int R.Value
+          | Unary    Int UnaryOp Expr
           deriving (Show)
 
 data Stmt

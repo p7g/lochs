@@ -17,6 +17,7 @@ executable lochs
     main-is:          Main.hs
     other-modules:    Lochs.AST
                     , Lochs.Diagnostic
+                    , Lochs.Eval
                     , Lochs.Parser
                     , Lochs.Runtime
                     , Lochs.Scanner
