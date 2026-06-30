@@ -7,54 +7,54 @@ import Lochs.Diagnostic (Diagnostic, mkDiagnostic)
 
 data TokenType
     -- Single-character tokens
-    = LeftParen | RightParen | LeftBrace | RightBrace
-    | Comma | Dot | Minus | Plus | Semicolon | Slash | Star
+    = TLeftParen | TRightParen | TLeftBrace | TRightBrace
+    | TComma | TDot | TMinus | TPlus | TSemicolon | TSlash | TStar
 
     -- One- or two-character tokens
-    | Bang | BangEqual | Equal | EqualEqual
-    | Greater | GreaterEqual | Less | LessEqual
+    | TBang | TBangEqual | TEqual | TEqualEqual
+    | TGreater | TGreaterEqual | TLess | TLessEqual
 
     -- Literals
-    | Identifier String | String_ String | Number Double
+    | TIdentifier String | TString String | TNumber Double
 
     -- Keywords
-    | And | Class | Else | False_ | Fun | For | If | Nil | Or
-    | Print | Return | Super | This | True_ | Var | While
+    | TAnd | TClass | TElse | TFalse | TFun | TFor | TIf | TNil | TOr
+    | TPrint | TReturn | TSuper | TThis | TTrue | TVar | TWhile
 
-    | Eof
+    | TEof
     deriving (Eq, Show)
 
-data Token = Token { ty :: TokenType
+data Token = Token { ty     :: TokenType
                    , lexeme :: String
-                   , line :: Int
+                   , line   :: Int
                    }
 
 instance Show Token where
     show t = (show $ ty t) ++ " " ++ (lexeme t) ++ " " ++ (fromMaybe "" (show_literal $ ty t))
         where
-            show_literal (Identifier s) = Just s
-            show_literal (String_ s) = Just s
-            show_literal (Number d) = Just $ show d
+            show_literal (TIdentifier s) = Just s
+            show_literal (TString s) = Just s
+            show_literal (TNumber d) = Just $ show d
             show_literal _ = Nothing
 
 keyword :: String -> Maybe TokenType
 keyword = \case
-    "and"    -> Just And
-    "class"  -> Just Class
-    "else"   -> Just Else
-    "false"  -> Just False_
-    "for"    -> Just For
-    "Fun"    -> Just Fun
-    "if"     -> Just If
-    "nil"    -> Just Nil
-    "or"     -> Just Or
-    "print"  -> Just Print
-    "return" -> Just Return
-    "super"  -> Just Super
-    "this"   -> Just This
-    "true"   -> Just True_
-    "var"    -> Just Var
-    "while"  -> Just While
+    "and"    -> Just TAnd
+    "class"  -> Just TClass
+    "else"   -> Just TElse
+    "false"  -> Just TFalse
+    "for"    -> Just TFor
+    "Fun"    -> Just TFun
+    "if"     -> Just TIf
+    "nil"    -> Just TNil
+    "or"     -> Just TOr
+    "print"  -> Just TPrint
+    "return" -> Just TReturn
+    "super"  -> Just TSuper
+    "this"   -> Just TThis
+    "true"   -> Just TTrue
+    "var"    -> Just TVar
+    "while"  -> Just TWhile
     _        -> Nothing
 
 scan :: String -> ([Token], [Diagnostic])
@@ -69,26 +69,26 @@ scan s =
             '\t':rest    -> skip rest
             '\r':rest    -> skip rest
             ' ':rest     -> skip rest
-            '(':rest     -> emit LeftParen "(" rest
-            ')':rest     -> emit RightParen ")" rest
-            '{':rest     -> emit LeftBrace "{" rest
-            '}':rest     -> emit RightBrace "}" rest
-            ',':rest     -> emit Comma "," rest
-            '.':rest     -> emit Dot "." rest
-            '-':rest     -> emit Minus "-" rest
-            '+':rest     -> emit Plus "+" rest
-            ';':rest     -> emit Semicolon ";" rest
-            '*':rest     -> emit Star "*" rest
-            '!':'=':rest -> emit BangEqual "!=" rest
-            '!':rest     -> emit Bang "!" rest
-            '=':'=':rest -> emit EqualEqual "==" rest
-            '=':rest     -> emit Equal "=" rest
-            '<':'=':rest -> emit LessEqual "<=" rest
-            '<':rest     -> emit Less "<" rest
-            '>':'=':rest -> emit GreaterEqual ">=" rest
-            '>':rest     -> emit Greater ">" rest
+            '(':rest     -> emit TLeftParen "(" rest
+            ')':rest     -> emit TRightParen ")" rest
+            '{':rest     -> emit TLeftBrace "{" rest
+            '}':rest     -> emit TRightBrace "}" rest
+            ',':rest     -> emit TComma "," rest
+            '.':rest     -> emit TDot "." rest
+            '-':rest     -> emit TMinus "-" rest
+            '+':rest     -> emit TPlus "+" rest
+            ';':rest     -> emit TSemicolon ";" rest
+            '*':rest     -> emit TStar "*" rest
+            '!':'=':rest -> emit TBangEqual "!=" rest
+            '!':rest     -> emit TBang "!" rest
+            '=':'=':rest -> emit TEqualEqual "==" rest
+            '=':rest     -> emit TEqual "=" rest
+            '<':'=':rest -> emit TLessEqual "<=" rest
+            '<':rest     -> emit TLess "<" rest
+            '>':'=':rest -> emit TGreaterEqual ">=" rest
+            '>':rest     -> emit TGreater ">" rest
             '/':'/':rest -> lineComment rest
-            '/':rest     -> emit Slash "/" rest
+            '/':rest     -> emit TSlash "/" rest
             '"':rest     -> string line "" rest
 
             c:rest | isDigit c -> number "" False (c:rest)
@@ -110,7 +110,7 @@ scan s =
 
                 string line' buf ('"':rest) =
                     let buf' = reverse buf
-                     in emitLine line' (String_ buf') (('"':buf') ++ "\"") rest
+                     in emitLine line' (TString buf') (('"':buf') ++ "\"") rest
                 string line' buf ('\n':rest) = string (line' + 1) ('\n':buf) rest
                 string line' buf (c:rest) = string line' (c:buf) rest
                 string line' _buf "" = diag line' "Unterminated string literal" ""
@@ -120,7 +120,7 @@ scan s =
                     c:rest | isDigit c -> number (c:buf) seenDot rest
                     rest ->
                         let buf' = reverse buf
-                         in emit (Number $ read $ buf') buf' rest
+                         in emit (TNumber $ read $ buf') buf' rest
 
                 isIdentStart c = isAscii c && (isAlpha c || c == '_')
                 isIdent c = isAscii c && (isAlphaNum c || c == '_')
@@ -129,5 +129,5 @@ scan s =
                     c:rest | isIdent c -> identifier (c:buf) rest
                     rest ->
                         let buf' = reverse buf
-                            tt = fromMaybe (Identifier buf') $ keyword buf'
+                            tt = fromMaybe (TIdentifier buf') $ keyword buf'
                          in emit tt buf' rest

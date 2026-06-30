@@ -78,7 +78,7 @@ synchronize :: Parser ()
 synchronize = peek >>= \case
     Nothing -> pure ()
     Just tok
-      | ty tok `elem` [Class, For, Fun, If, Print, Return, Var, While] ->
+      | ty tok `elem` [TClass, TFor, TFun, TIf, TPrint, TReturn, TVar, TWhile] ->
           pure ()
       | otherwise -> item >> synchronize
 
@@ -95,13 +95,13 @@ expression = equality
 
 binop :: Token -> BinaryOp
 binop tok = case ty tok of
-    BangEqual  -> BinNe
-    EqualEqual -> BinEq
-    Minus      -> BinSub
-    Plus       -> BinAdd
-    Slash      -> BinDiv
-    Star       -> BinMul
-    _          -> undefined
+    TBangEqual  -> BinNe
+    TEqualEqual -> BinEq
+    TMinus      -> BinSub
+    TPlus       -> BinAdd
+    TSlash      -> BinDiv
+    TStar       -> BinMul
+    _           -> undefined
 
 binary :: [TokenType] -> Parser Expr -> Parser Expr
 binary tts next = next >>= loop
@@ -113,26 +113,26 @@ binary tts next = next >>= loop
                 loop lhs'
 
 equality :: Parser Expr
-equality = binary [EqualEqual, BangEqual] comparison
+equality = binary [TEqualEqual, TBangEqual] comparison
 
 comparison :: Parser Expr
-comparison = binary [Greater, GreaterEqual, Less, LessEqual] term
+comparison = binary [TGreater, TGreaterEqual, TLess, TLessEqual] term
 
 term :: Parser Expr
-term = binary [Minus, Plus] factor
+term = binary [TMinus, TPlus] factor
 
 factor :: Parser Expr
-factor = binary [Slash, Star] unary
+factor = binary [TSlash, TStar] unary
 
 unop :: Token -> UnaryOp
 unop tok = case ty tok of
-    Bang  -> UnaryNot
-    Minus -> UnaryNeg
-    _     -> undefined
+    TBang  -> UnaryNot
+    TMinus -> UnaryNeg
+    _      -> undefined
 
 unary :: Parser Expr
 unary = do
-    op <- match [Bang, Minus]
+    op <- match [TBang, TMinus]
     case op of
         Nothing -> primary
         Just op' -> do
@@ -143,14 +143,14 @@ primary :: Parser Expr
 primary = peek >>= \case
     Nothing -> parseError 0 "Unexpected end of file"
     Just tok -> case ty tok of
-        True_     -> item >> pure (Literal (VBool True))
-        False_    -> item >> pure (Literal (VBool False))
-        Nil       -> item >> pure (Literal VNil)
-        Number n  -> item >> pure (Literal (VNumber n))
-        String_ s -> item >> pure (Literal (VString s))
-        LeftParen -> do
-            _ <- token LeftParen
+        TTrue     -> item >> pure (Literal (VBool True))
+        TFalse    -> item >> pure (Literal (VBool False))
+        TNil       -> item >> pure (Literal VNil)
+        TNumber n  -> item >> pure (Literal (VNumber n))
+        TString s -> item >> pure (Literal (VString s))
+        TLeftParen -> do
+            _ <- token TLeftParen
             expr <- expression
-            _ <- token RightParen
+            _ <- token TRightParen
             pure $ Grouping expr
-        _         -> unexpectedToken tok (Right "expression")
+        _          -> unexpectedToken tok (Right "expression")
