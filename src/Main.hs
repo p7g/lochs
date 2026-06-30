@@ -13,42 +13,41 @@ import Lochs.Scanner (scan)
 
 main :: IO ()
 main = getArgs >>= \case
-    [filename] -> runFile filename
-    [] -> runPrompt
+    [filename] -> mkEnv >>= runFile filename
+    [] -> mkEnv >>= runPrompt
     _ -> do
         hPutStrLn stderr "Usage: lochs [script]"
         exitWith $ ExitFailure 64
 
-runFile :: String -> IO ()
-runFile file = do
+runFile :: String -> Env -> IO ()
+runFile file env = do
     code <- readFile file
-    hadError <- run code
+    hadError <- run env code
     when hadError $ exitWith (ExitFailure 65)
 
-runPrompt :: IO ()
-runPrompt = catchIOError loop handler
+runPrompt :: Env -> IO ()
+runPrompt env = catchIOError loop handler
     where
         loop = do
             putStr "> "
             hFlush stdout
             line <- getLine
-            _hadError <- run line
+            _hadError <- run env line
             loop
         handler e = if isEOFError e then putStrLn "" else ioError e
 
-run :: String -> IO Bool
-run code = do
+run :: Env -> String -> IO Bool
+run env code = do
     let (tokens, diagnostics) = scan code
     case diagnostics of
       d:ds -> do
         traverse_ (putStrLn . show) (d:ds)
         pure True
-      _ -> case parse tokens of
-        Left ds -> do
-            traverse_ (putStrLn . show) ds
-            pure True
-        Right stmts -> do
-            result <- exec stmts
-            case result of
-              Left  d  -> putStrLn (show d) >> pure True
-              Right () -> pure False
+      _ -> do
+          let (stmts, diags) = parse tokens
+          traverse_ (putStrLn . show) diags
+          if null diags
+             then exec env stmts >>= \case
+                Left  d  -> putStrLn (show d) >> pure True
+                Right () -> pure False
+             else pure True

@@ -1,41 +1,97 @@
-module Lochs.Eval (exec) where
+module Lochs.Eval (Env, mkEnv, exec) where
 
 import Control.Monad (ap)
+import Data.IORef (IORef, modifyIORef, newIORef, readIORef, writeIORef)
+import Data.Map qualified as Map
+import Data.Maybe (fromMaybe)
 
 import Lochs.AST
 import Lochs.Diagnostic
 import Lochs.Runtime
 
-exec :: [Stmt] -> IO (Either Diagnostic ())
-exec stmts = runEval (execProgram stmts)
+exec :: Env -> [Stmt] -> IO (Either Diagnostic ())
+exec env stmts = runEval (execProgram stmts) env
 
-newtype Eval a = Eval { runEval :: IO (Either Diagnostic a) }
+data Env = Env
+    { values :: IORef (Map.Map String (IORef Value))
+    , parent :: Maybe Env
+    }
+
+mkEnv :: IO Env
+mkEnv = do
+    ref <- newIORef Map.empty
+    pure $ Env ref Nothing
+
+newtype Eval a = Eval { runEval :: Env -> IO (Either Diagnostic a) }
 
 instance Functor Eval where
-    fmap f (Eval io) = Eval $ fmap (fmap f) io
+    fmap f (Eval g) = Eval $ \env -> fmap (fmap f) (g env)
 
 instance Applicative Eval where
-    pure = Eval . pure . Right
+    pure x = Eval $ \_ -> pure (Right x)
     (<*>) = ap
 
 instance Monad Eval where
-    Eval io >>= f = Eval $ io >>= either (pure . Left) (runEval . f)
+    Eval g >>= f = Eval $ \env ->
+        g env >>= either (pure . Left) (\a -> runEval (f a) env)
 
 liftIO' :: IO a -> Eval a
-liftIO' io = Eval (Right <$> io)
+liftIO' io = Eval $ \_ -> Right <$> io
 
 throwErr :: Diagnostic -> Eval a
-throwErr = Eval . pure . Left
+throwErr d = Eval $ \_ -> pure (Left d)
+
+getEnv :: Eval Env
+getEnv = Eval $ \env -> pure (Right env)
+
+withEnv :: Env -> Eval a -> Eval a
+withEnv env (Eval g) = Eval $ \_ -> g env
+
+newScope :: Eval a -> Eval a
+newScope action = do
+    parentEnv <- getEnv
+    ref <- liftIO' $ newIORef Map.empty
+    withEnv (Env ref (Just parentEnv)) action
+
+defineVar :: String -> Value -> Eval ()
+defineVar name val = do
+    env <- getEnv
+    valCell <- liftIO' $ val `seq` newIORef val
+    liftIO' $ modifyIORef (values env) (Map.insert name valCell)
+
+varRef :: Int -> String -> Env -> Eval (IORef Value)
+varRef line name env = do
+    m <- liftIO' $ readIORef (values env)
+    case Map.lookup name m of
+      Just v -> pure v
+      Nothing -> maybe nameError (varRef line name) (parent env)
+  where nameError = throwErr $ mkDiagnostic line (" at " ++ name) "No such variable"
+
+lookupVar :: Int -> String -> Eval Value
+lookupVar line name = do
+    env <- getEnv
+    ref <- varRef line name env
+    liftIO' $ readIORef ref
+
+assignVar :: Int -> String -> Value -> Eval ()
+assignVar line name val = do
+    env <- getEnv
+    ref <- varRef line name env
+    liftIO' $ val `seq` writeIORef ref val
 
 execProgram :: [Stmt] -> Eval ()
 execProgram []     = pure ()
-execProgram (x:xs) = execOne x >> execProgram xs
+execProgram (x:xs) = execStmt x >> execProgram xs
 
-execOne :: Stmt -> Eval ()
-execOne (PrintStmt _line expr) = do
+execStmt :: Stmt -> Eval ()
+execStmt (PrintStmt _line expr) = do
     val <- eval expr
     liftIO' $ putStrLn (stringify val)
-execOne (ExprStmt  _line expr) = eval expr >> pure ()
+execStmt (ExprStmt  _line expr) = eval expr >> pure ()
+execStmt (VarDecl _line name expr) = do
+    val <- traverse eval expr
+    defineVar name $ fromMaybe VNil val
+execStmt (Block _line stmts) = newScope (execProgram stmts)
 
 eval :: Expr -> Eval Value
 eval = \case
@@ -48,6 +104,11 @@ eval = \case
         lhs <- eval l
         rhs <- eval r
         binary line op lhs rhs
+    Variable line name -> lookupVar line name
+    Assign line name expr -> do
+        val <- eval expr
+        assignVar line name val
+        pure val
 
 typeError :: Int -> Value -> String -> Eval a
 typeError line val expected = throwErr $
