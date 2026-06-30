@@ -21,7 +21,7 @@ data TokenType
     | TAnd | TClass | TElse | TFalse | TFun | TFor | TIf | TNil | TOr
     | TPrint | TReturn | TSuper | TThis | TTrue | TVar | TWhile
 
-    | TEof
+    | TEOF
     deriving (Eq, Show)
 
 data Token = Token { ty     :: TokenType
@@ -64,7 +64,7 @@ scan s =
     where
         scanInner :: Int -> [Token] -> [Diagnostic] -> String -> ([Token], [Diagnostic])
         scanInner line tokens diags = \case
-            "" -> (tokens, diags)
+            "" -> (mkToken TEOF "" : tokens, diags)
             '\n':rest    -> scanInner (line + 1) tokens diags rest
             '\t':rest    -> skip rest
             '\r':rest    -> skip rest
@@ -94,7 +94,7 @@ scan s =
             c:rest | isDigit c -> number "" False (c:rest)
             c:rest | isIdentStart c -> identifier [c] rest
 
-            c:rest   -> diag line ("Unexpected token " ++ show c) rest
+            c:rest -> diag line ("Unexpected token " ++ show c) rest
 
             where
                 next = scanInner line

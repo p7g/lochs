@@ -85,10 +85,8 @@ synchronize = peek >>= \case
 requireEOF :: Parser a -> Parser a
 requireEOF p = do
     val <- p
-    tok <- peek
-    case tok of
-      Just tok' -> unexpectedToken tok' (Right "end of file")
-      Nothing -> pure val
+    token TEOF
+    pure val
 
 expression :: Parser Expr
 expression = equality
