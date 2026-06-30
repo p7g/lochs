@@ -17,6 +17,9 @@ executable lochs
     main-is:          Main.hs
     other-modules:    Lochs.Scanner
                     , Lochs.Diagnostic
+                    , Lochs.AST
+                    , Lochs.Runtime
+                    , Lochs.Pretty
     build-depends:    base ^>=4.22.0.0
     hs-source-dirs:   src
     default-language: GHC2024
