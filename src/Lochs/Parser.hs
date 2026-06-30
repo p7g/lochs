@@ -1,17 +1,14 @@
 module Lochs.Parser (parse) where
 
-import Data.Bifunctor (bimap)
-import Data.List (singleton)
-
-import Lochs.AST (BinaryOp(..), Expr(..), UnaryOp(..))
-import Lochs.Diagnostic (Diagnostic, mkDiagnostic)
+import Lochs.AST
+import Lochs.Diagnostic hiding (line)
 import Lochs.Runtime (Value(..))
-import Lochs.Scanner (Token(..), TokenType(..))
+import Lochs.Scanner
 
-parse :: [Token] -> Either [Diagnostic] Expr
-parse = bimap singleton fst . runParser (requireEOF expression)
+parse :: [Token] -> Either [Diagnostic] [Stmt]
+parse = fmap fst . runParser program
 
-newtype Parser a = Parser { runParser :: [Token] -> Either Diagnostic (a, [Token]) }
+newtype Parser a = Parser { runParser :: [Token] -> Either [Diagnostic] (a, [Token]) }
 
 instance Functor Parser where
     fmap f p = Parser $ \cs ->
@@ -35,8 +32,11 @@ instance Monad Parser where
           Left d         -> Left d
           Right (a, cs') -> runParser (f a) cs'
 
+instance MonadFail Parser where
+    fail s = parseError 0 "" ("Internal parser error: " ++ s)
+
 parseError :: Int -> String -> String -> Parser a
-parseError line loc message = Parser $ \_ -> Left $ mkDiagnostic line loc message
+parseError line loc message = Parser $ \_ -> Left [mkDiagnostic line loc message]
 
 unexpectedToken :: Token -> Either TokenType String -> Parser a
 unexpectedToken got expected = parseError (line got) loc message
@@ -49,7 +49,7 @@ unexpectedToken got expected = parseError (line got) loc message
 
 item :: Parser Token
 item = Parser $ \case
-    []   -> Left $ mkDiagnostic 0 " at end" "Expected token"
+    []   -> Left [mkDiagnostic 0 " at end" "Expected token"]
     c:cs -> Right (c, cs)
 
 peek :: Parser (Maybe Token)
@@ -83,11 +83,34 @@ synchronize = peek >>= \case
           pure ()
       | otherwise -> item >> synchronize
 
-requireEOF :: Parser a -> Parser a
-requireEOF p = do
-    val <- p
-    _ <- token TEOF
-    pure val
+program :: Parser [Stmt]
+program = loop []
+    where loop stmts = do
+            stmt <- statement
+            eofTok <- match [TEOF]
+            case eofTok of
+              Just _ -> pure $ reverse (stmt:stmts)
+              Nothing -> loop (stmt:stmts)
+
+statement :: Parser Stmt
+statement = do
+    Just tok <- peek
+    case ty tok of
+      TPrint -> printStatement
+      _      -> exprStatement
+
+printStatement :: Parser Stmt
+printStatement = do
+    tok <- token TPrint
+    expr <- expression
+    _ <- token TSemicolon
+    pure $ PrintStmt (line tok) expr
+
+exprStatement :: Parser Stmt
+exprStatement = do
+    expr <- expression
+    _ <- token TSemicolon
+    pure $ ExprStmt (exprLine expr) expr
 
 expression :: Parser Expr
 expression = equality

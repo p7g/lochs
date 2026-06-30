@@ -17,10 +17,12 @@ data BinaryOp = BinAdd
 data UnaryOp = UnaryNeg | UnaryNot
     deriving (Show)
 
-data Expr = Binary   Int Expr BinaryOp Expr
-          | Grouping Int Expr
-          | Literal  Int R.Value
-          | Unary    Int UnaryOp Expr
+data Expr = Binary   { exprLine :: Int, lhs :: Expr, binOp :: BinaryOp, rhs :: Expr }
+          | Grouping { exprLine :: Int, expr :: Expr }
+          | Literal  { exprLine :: Int, value :: R.Value }
+          | Unary    { exprLine :: Int, unaryOp :: UnaryOp, expr :: Expr }
           deriving (Show)
 
-data Stmt
+data Stmt = ExprStmt  Int Expr
+          | PrintStmt Int Expr
+          deriving (Show)
