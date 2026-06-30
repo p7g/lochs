@@ -1,8 +1,8 @@
 module Lochs.Runtime (Value(..), isEqual, isTruthy, stringify) where
 
-data Value = VBool Bool
-           | VNumber Double
-           | VString String
+data Value = VBool   !Bool
+           | VNumber !Double
+           | VString !String
            | VNil
            deriving (Eq)
 
