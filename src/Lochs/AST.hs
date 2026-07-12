@@ -44,4 +44,5 @@ data Stmt = ExprStmt  { stmtLine :: Int, stmtExpr :: !Expr }
           | VarDecl   { stmtLine :: Int, varName :: !String, init :: !(Maybe Expr) }
           | Block     { stmtLine :: Int, stmts :: ![Stmt] }
           | IfStmt    { stmtLine :: Int, cond :: !Expr, cons :: !Stmt, alt :: !(Maybe Stmt) }
+          | WhileStmt { stmtLine :: Int, cond :: !Expr, body :: !Stmt }
           deriving (Show)

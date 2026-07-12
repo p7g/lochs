@@ -108,9 +108,7 @@ program = loop []
     where loop stmts = do
             stmt <- declaration
             eofTok <- match [TEOF]
-            let stmts' = case stmt of
-                           Just stmt' -> stmt':stmts
-                           Nothing    -> stmts
+            let stmts' = maybe stmts (:stmts) stmt
             case eofTok of
               Just _ -> pure $ reverse stmts'
               Nothing -> loop stmts'
@@ -144,6 +142,7 @@ statement = do
       TPrint     -> printStatement
       TLeftBrace -> block
       TIf        -> ifStatement
+      TWhile     -> whileStatement
       _          -> exprStatement
 
 printStatement :: Parser Stmt
@@ -175,6 +174,15 @@ ifStatement = do
     elsetok <- match [TElse]
     elsebody <- traverse (const statement) elsetok
     pure $ IfStmt (line iftok) cond body elsebody
+
+whileStatement :: Parser Stmt
+whileStatement = do
+    whiletok <- token TWhile
+    _ <- token TLeftParen
+    cond <- expression
+    _ <- token TRightParen
+    body <- statement
+    pure $ WhileStmt (line whiletok) cond body
 
 exprStatement :: Parser Stmt
 exprStatement = do

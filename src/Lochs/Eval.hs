@@ -1,6 +1,6 @@
 module Lochs.Eval (Env, mkEnv, exec) where
 
-import Control.Monad (ap)
+import Control.Monad (ap, when)
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef, writeIORef)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
@@ -97,6 +97,11 @@ execStmt (IfStmt _line cond cons alt) = do
     if isTruthy val
        then execStmt cons
        else maybe (pure ()) execStmt alt
+execStmt w@(WhileStmt _line cond body) = do
+    val <- eval cond
+    when (isTruthy val) $ do
+       _ <- execStmt body
+       execStmt w
 
 eval :: Expr -> Eval Value
 eval = \case
