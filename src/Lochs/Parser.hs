@@ -143,6 +143,7 @@ statement = do
       TLeftBrace -> block
       TIf        -> ifStatement
       TWhile     -> whileStatement
+      TFor       -> forStatement
       _          -> exprStatement
 
 printStatement :: Parser Stmt
@@ -183,6 +184,40 @@ whileStatement = do
     _ <- token TRightParen
     body <- statement
     pure $ WhileStmt (line whiletok) cond body
+
+forStatement :: Parser Stmt
+forStatement = do
+    fortok <- token TFor
+    _ <- token TLeftParen
+
+    initializer <- peek >>= \case
+        Nothing -> pure Nothing
+        Just tok -> case ty tok of
+            TVar       -> Just <$> varDecl
+            TSemicolon -> pure Nothing
+            _          -> Just <$> exprStatement
+
+    cond <- match [TSemicolon] >>= \case
+        Just tok -> pure $ Literal (line tok) (VBool True)
+        Nothing  -> do
+            expr <- expression
+            _ <- token TSemicolon
+            pure expr
+
+    inc <- match [TLeftParen] >>= \case
+        Just _ -> pure Nothing
+        _      -> Just <$> expression
+
+    _ <- token TRightParen
+    body <- statement >>= \s ->
+        case inc of
+          Just i -> pure $ Block (stmtLine s) [s, ExprStmt (exprLine i) i]
+          Nothing -> pure s
+
+    let w = WhileStmt (line fortok) cond body
+    pure $ case initializer of
+      Just i  -> Block (line fortok) [i, w]
+      Nothing -> w
 
 exprStatement :: Parser Stmt
 exprStatement = do
