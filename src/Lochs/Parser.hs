@@ -99,7 +99,7 @@ synchronize :: Parser ()
 synchronize = peek >>= \case
     Nothing -> pure ()
     Just tok
-      | ty tok `elem` [TClass, TFor, TFun, TIf, TPrint, TReturn, TVar, TWhile] ->
+      | ty tok `elem` [TClass, TFor, TFun, TIf, TPrint, TReturn, TVar, TWhile, TEOF] ->
           pure ()
       | otherwise -> item >> synchronize
 
