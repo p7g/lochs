@@ -1,6 +1,6 @@
 module Lochs.Parser (ParseResult(..), parse) where
 
-import Control.Monad (ap)
+import Control.Monad (ap, guard)
 
 import Lochs.AST
 import Lochs.Diagnostic hiding (line)
@@ -85,14 +85,15 @@ filterMap diagMsg predicate = do
             Nothing -> unexpectedToken tok' (Right diagMsg)
             Just x  -> item >> pure x
 
+matchWith :: (Token -> Maybe a) -> Parser (Maybe (Token, a))
+matchWith f = do
+    maybeTok <- peek
+    case maybeTok >>= \tok -> (,) tok <$> f tok of
+      Nothing    -> pure Nothing
+      r@(Just _) -> item >> pure r
+
 match :: [TokenType] -> Parser (Maybe Token)
-match tts = do
-    tok <- peek
-    case tok of
-      Nothing -> pure Nothing
-      Just tok'
-        | ty tok' `elem` tts -> Just <$> item
-        | otherwise          -> pure Nothing
+match tts = fmap (fmap fst) $ matchWith (guard . (`elem` tts) . ty)
 
 synchronize :: Parser ()
 synchronize = peek >>= \case
@@ -185,51 +186,48 @@ assignment = do
             _            ->
                 parseError (exprLine lhs) "" ("Can't assign to " ++ show lhs)
 
-binop :: Token -> BinaryOp
-binop tok = case ty tok of
-    TBangEqual  -> BinNe
-    TEqualEqual -> BinEq
-    TMinus      -> BinSub
-    TPlus       -> BinAdd
-    TSlash      -> BinDiv
-    TStar       -> BinMul
-    _           -> undefined
-
-binary :: [TokenType] -> Parser Expr -> Parser Expr
-binary tts next = next >>= loop
-    where loop lhs = match tts >>= \case
-              Nothing -> pure lhs
-              Just op' -> do
+binary :: Parser Expr -> (TokenType -> Maybe BinaryOp) -> Parser Expr
+binary next tokToOp = next >>= loop
+    where loop lhs = matchWith (tokToOp . ty) >>= \case
+              Nothing        -> pure lhs
+              Just (tok, op) -> do
                 rhs <- next
-                let lhs' = Binary (line op') lhs (binop op') rhs
-                loop lhs'
+                loop $ Binary (line tok) lhs op rhs
 
 equality :: Parser Expr
-equality = binary [TEqualEqual, TBangEqual] comparison
+equality = binary comparison $ \case
+      TEqualEqual -> Just BinEq
+      TBangEqual -> Just BinNe
+      _ -> Nothing
 
 comparison :: Parser Expr
-comparison = binary [TGreater, TGreaterEqual, TLess, TLessEqual] term
+comparison = binary term $ \case
+    TGreater      -> Just BinGt
+    TGreaterEqual -> Just BinGte
+    TLess         -> Just BinLt
+    TLessEqual    -> Just BinLte
+    _             -> Nothing
 
 term :: Parser Expr
-term = binary [TMinus, TPlus] factor
+term = binary factor $ \case
+    TMinus -> Just BinSub
+    TPlus  -> Just BinAdd
+    _      -> Nothing
 
 factor :: Parser Expr
-factor = binary [TSlash, TStar] unary
-
-unop :: Token -> UnaryOp
-unop tok = case ty tok of
-    TBang  -> UnaryNot
-    TMinus -> UnaryNeg
-    _      -> undefined
+factor = binary unary $ \case
+    TSlash -> Just BinDiv
+    TStar  -> Just BinMul
+    _      -> Nothing
 
 unary :: Parser Expr
 unary = do
-    op <- match [TBang, TMinus]
-    case op of
-        Nothing -> primary
-        Just op' -> do
-            rhs <- unary
-            pure $ Unary (line op') (unop op') rhs
+    m <- matchWith $ \tok ->
+        case ty tok of
+          TBang  -> Just UnaryNot
+          TMinus -> Just UnaryNeg
+          _      -> Nothing
+    maybe primary (\(tok, op) -> unary >>= pure . Unary (line tok) op) m
 
 primary :: Parser Expr
 primary = peek >>= \case
