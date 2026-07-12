@@ -11,40 +11,51 @@ data ParseResult a = Failure   [Diagnostic] [Token]
                    | Success a [Diagnostic] [Token]
 
 parse :: [Token] -> ([Stmt], [Diagnostic])
-parse ts = case runParser program ts [] of
+parse ts = case runParser program ts [] (Context False) of
     Success stmts ds _ -> (stmts, ds)
     Failure ds _       -> ([], ds)
 
+data Context = Context { contextInLoop :: Bool }
+
 newtype Parser a = Parser
-    { runParser :: [Token] -> [Diagnostic] -> ParseResult a }
+    { runParser :: [Token] -> [Diagnostic] -> Context -> ParseResult a }
 
 instance Functor Parser where
-    fmap f p = Parser $ \cs ds ->
-        case runParser p cs ds of
+    fmap f p = Parser $ \cs ds ctx ->
+        case runParser p cs ds ctx of
           Failure   ds' cs' -> Failure ds' cs'
           Success x ds' cs' -> Success (f x) ds' cs'
 
 instance Applicative Parser where
-    pure x = Parser $ \cs ds -> Success x ds cs
+    pure x = Parser $ \cs ds _ -> Success x ds cs
     (<*>) = ap
 
 instance Monad Parser where
-    p >>= f = Parser $ \cs ds ->
-        case runParser p cs ds of
+    p >>= f = Parser $ \cs ds ctx ->
+        case runParser p cs ds ctx of
           Failure   ds' cs' -> Failure ds' cs'
-          Success a ds' cs' -> runParser (f a) cs' ds'
+          Success a ds' cs' -> runParser (f a) cs' ds' ctx
 
 instance MonadFail Parser where
     fail s = parseError 0 "" ("Internal parser error: " ++ s)
 
 catchError :: Parser a -> Parser a -> Parser a
-p `catchError` recovery = Parser $ \cs ds ->
-    case runParser p cs ds of
-      Failure ds' cs' -> runParser recovery cs' ds'
+p `catchError` recovery = Parser $ \cs ds ctx ->
+    case runParser p cs ds ctx of
+      Failure ds' cs' -> runParser recovery cs' ds' ctx
       success         -> success
 
+inLoop :: Parser Bool
+inLoop = Parser $ \cs ds ctx -> Success (contextInLoop ctx) ds cs
+
+modifyContext :: (Context -> Context) -> Parser a -> Parser a
+modifyContext f p = Parser $ \cs ds ctx -> runParser p cs ds (f ctx)
+
+enterLoop :: Parser a -> Parser a
+enterLoop p = modifyContext (\ctx -> ctx { contextInLoop = True }) p
+
 parseError :: Int -> String -> String -> Parser a
-parseError line loc message = Parser $ \cs ds ->
+parseError line loc message = Parser $ \cs ds _ ->
     Failure (ds ++ [mkDiagnostic line loc message]) cs
 
 unexpectedToken :: Token -> Either TokenType String -> Parser a
@@ -57,12 +68,12 @@ unexpectedToken got expected = parseError (line got) loc message
             Right s -> s
 
 item :: Parser Token
-item = Parser $ \cs ds -> case cs of
+item = Parser $ \cs ds _ -> case cs of
     []   -> Failure (ds ++ [mkDiagnostic 0 " at end" "Expected token"]) []
     c:cs' -> Success c ds cs'
 
 peek :: Parser (Maybe Token)
-peek = Parser $ \cs ds -> case cs of
+peek = Parser $ \cs ds _ -> case cs of
     []  -> Success Nothing  ds []
     t:_ -> Success (Just t) ds cs
 
@@ -144,6 +155,8 @@ statement = do
       TIf        -> ifStatement
       TWhile     -> whileStatement
       TFor       -> forStatement
+      TBreak     -> breakStatement
+      TContinue  -> continueStatement
       _          -> exprStatement
 
 printStatement :: Parser Stmt
@@ -188,8 +201,20 @@ whileStatement = do
     _ <- token TLeftParen
     cond <- expression
     _ <- token TRightParen
-    body <- statement
+    body <- enterLoop statement
     pure $ WhileStmt (line whiletok) cond body
+
+desugarContinue :: Expr -> Stmt -> Stmt
+desugarContinue incr stmt = case stmt of
+    ContinueStmt line -> Block line [ExprStmt (exprLine incr) incr, stmt]
+    Block line stmts  -> Block line (map (desugarContinue incr) stmts)
+    IfStmt line cond cons alt ->
+        IfStmt line cond (desugarContinue incr cons) (fmap (desugarContinue incr) alt)
+    WhileStmt _ _ _   -> stmt
+    BreakStmt _       -> stmt
+    PrintStmt _ _     -> stmt
+    ExprStmt _ _      -> stmt
+    VarDecl _ _ _     -> stmt
 
 forStatement :: Parser Stmt
 forStatement = do
@@ -215,15 +240,33 @@ forStatement = do
         _      -> Just <$> expression
 
     _ <- token TRightParen
-    body <- statement >>= \s ->
+    body <- enterLoop statement >>= \s ->
         case inc of
-          Just i -> pure $ Block (stmtLine s) [s, ExprStmt (exprLine i) i]
+          Just i -> pure $ Block (stmtLine s) [desugarContinue i s, ExprStmt (exprLine i) i]
           Nothing -> pure s
 
     let w = WhileStmt (line fortok) cond body
     pure $ case initializer of
       Just i  -> Block (line fortok) [i, w]
       Nothing -> w
+
+breakStatement :: Parser Stmt
+breakStatement = do
+    tok <- token TBreak
+    l <- inLoop
+    _ <- token TSemicolon
+    if l
+       then pure $ BreakStmt (line tok)
+       else parseError (line tok) "" "Break outside loop"
+
+continueStatement :: Parser Stmt
+continueStatement = do
+    tok <- token TContinue
+    l <- inLoop
+    _ <- token TSemicolon
+    if l
+       then pure $ ContinueStmt (line tok)
+       else parseError (line tok) "" "continue outside loop"
 
 exprStatement :: Parser Stmt
 exprStatement = do

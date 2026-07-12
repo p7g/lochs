@@ -48,6 +48,8 @@ run env code = do
           traverse_ (putStrLn . show) diags
           if null diags
              then exec env stmts >>= \case
-                Left  d  -> putStrLn (show d) >> pure True
-                Right () -> pure False
+                Err d    -> putStrLn (show d) >> pure True
+                Ok ()    -> pure False
+                Break    -> error "Unreachable: break outside loop"
+                Continue -> error "Unreachable: continue outside loop"
              else pure True

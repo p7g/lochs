@@ -1,4 +1,4 @@
-module Lochs.Eval (Env, mkEnv, exec) where
+module Lochs.Eval (Env, EvalResult(..), mkEnv, exec) where
 
 import Control.Monad (ap, when)
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef, writeIORef)
@@ -9,7 +9,19 @@ import Lochs.AST
 import Lochs.Diagnostic
 import Lochs.Runtime
 
-exec :: Env -> [Stmt] -> IO (Either Diagnostic ())
+data EvalResult a = Ok a
+                  | Break
+                  | Continue
+                  | Err Diagnostic
+
+instance Functor EvalResult where
+    fmap f = \case
+        Ok a     -> Ok (f a)
+        Break    -> Break
+        Continue -> Continue
+        Err d    -> Err d
+
+exec :: Env -> [Stmt] -> IO (EvalResult ())
 exec env stmts = runEval (execProgram stmts) env
 
 data Env = Env
@@ -22,27 +34,39 @@ mkEnv = do
     ref <- newIORef Map.empty
     pure $ Env ref Nothing
 
-newtype Eval a = Eval { runEval :: Env -> IO (Either Diagnostic a) }
+newtype Eval a = Eval { runEval :: Env -> IO (EvalResult a) }
 
 instance Functor Eval where
     fmap f (Eval g) = Eval $ \env -> fmap (fmap f) (g env)
 
 instance Applicative Eval where
-    pure x = Eval $ \_ -> pure (Right x)
+    pure x = Eval $ \_ -> pure (Ok x)
     (<*>) = ap
 
 instance Monad Eval where
     Eval g >>= f = Eval $ \env ->
-        g env >>= either (pure . Left) (\a -> runEval (f a) env)
+        g env >>= \case
+            Ok a     -> runEval (f a) env
+            Break    -> pure Break
+            Continue -> pure Continue
+            Err d    -> pure (Err d)
 
 liftIO' :: IO a -> Eval a
-liftIO' io = Eval $ \_ -> Right <$> io
+liftIO' io = Eval $ \_ -> Ok <$> io
 
 throwErr :: Diagnostic -> Eval a
-throwErr d = Eval $ \_ -> pure (Left d)
+throwErr d = Eval $ \_ -> pure (Err d)
+
+observe :: Eval a -> Eval (EvalResult a)
+observe (Eval g) = Eval $ \env -> do
+    result <- g env
+    pure (Ok result)
+
+reraise :: EvalResult a -> Eval a
+reraise r = Eval $ \_ -> pure r
 
 getEnv :: Eval Env
-getEnv = Eval $ \env -> pure (Right env)
+getEnv = Eval $ \env -> pure (Ok env)
 
 withEnv :: Env -> Eval a -> Eval a
 withEnv env (Eval g) = Eval $ \_ -> g env
@@ -100,8 +124,13 @@ execStmt (IfStmt _line cond cons alt) = do
 execStmt w@(WhileStmt _line cond body) = do
     val <- eval cond
     when (isTruthy val) $ do
-       _ <- execStmt body
-       execStmt w
+        observe (execStmt body) >>= \case
+            Ok _     -> execStmt w
+            Continue -> execStmt w
+            Break    -> pure ()
+            Err d    -> reraise (Err d)
+execStmt (BreakStmt _)    = Eval $ \_ -> pure Break
+execStmt (ContinueStmt _) = Eval $ \_ -> pure Continue
 
 eval :: Expr -> Eval Value
 eval = \case

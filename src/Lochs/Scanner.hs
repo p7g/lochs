@@ -18,8 +18,8 @@ data TokenType
     | TIdentifier String | TString String | TNumber Double
 
     -- Keywords
-    | TAnd | TClass | TElse | TFalse | TFun | TFor | TIf | TNil | TOr
-    | TPrint | TReturn | TSuper | TThis | TTrue | TVar | TWhile
+    | TAnd | TBreak | TClass | TContinue | TElse | TFalse | TFun | TFor | TIf
+    | TNil | TOr | TPrint | TReturn | TSuper | TThis | TTrue | TVar | TWhile
 
     | TEOF
     deriving (Eq, Show)
@@ -39,23 +39,25 @@ instance Show Token where
 
 keyword :: String -> Maybe TokenType
 keyword = \case
-    "and"    -> Just TAnd
-    "class"  -> Just TClass
-    "else"   -> Just TElse
-    "false"  -> Just TFalse
-    "for"    -> Just TFor
-    "Fun"    -> Just TFun
-    "if"     -> Just TIf
-    "nil"    -> Just TNil
-    "or"     -> Just TOr
-    "print"  -> Just TPrint
-    "return" -> Just TReturn
-    "super"  -> Just TSuper
-    "this"   -> Just TThis
-    "true"   -> Just TTrue
-    "var"    -> Just TVar
-    "while"  -> Just TWhile
-    _        -> Nothing
+    "and"      -> Just TAnd
+    "break"    -> Just TBreak
+    "class"    -> Just TClass
+    "continue" -> Just TContinue
+    "else"     -> Just TElse
+    "false"    -> Just TFalse
+    "for"      -> Just TFor
+    "Fun"      -> Just TFun
+    "if"       -> Just TIf
+    "nil"      -> Just TNil
+    "or"       -> Just TOr
+    "print"    -> Just TPrint
+    "return"   -> Just TReturn
+    "super"    -> Just TSuper
+    "this"     -> Just TThis
+    "true"     -> Just TTrue
+    "var"      -> Just TVar
+    "while"    -> Just TWhile
+    _          -> Nothing
 
 scan :: String -> ([Token], [Diagnostic])
 scan s =
