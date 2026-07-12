@@ -187,7 +187,7 @@ expression = assignment
 
 assignment :: Parser Expr
 assignment = do
-    lhs <- equality
+    lhs <- logicalOr
     equals <- match [TEqual]
     case equals of
       Nothing -> pure lhs
@@ -198,22 +198,30 @@ assignment = do
             _            ->
                 parseError (exprLine lhs) "" ("Can't assign to " ++ show lhs)
 
-binary :: Parser Expr -> (TokenType -> Maybe BinaryOp) -> Parser Expr
-binary next tokToOp = next >>= loop
+type BinaryLike op = Int -> Expr -> op -> Expr -> Expr
+
+binary :: BinaryLike op -> Parser Expr -> (TokenType -> Maybe op) -> Parser Expr
+binary mkExpr next tokToOp = next >>= loop
     where loop lhs = matchWith (tokToOp . ty) >>= \case
               Nothing        -> pure lhs
               Just (tok, op) -> do
                 rhs <- next
-                loop $ Binary (line tok) lhs op rhs
+                loop $ mkExpr (line tok) lhs op rhs
+
+logicalOr :: Parser Expr
+logicalOr = binary Logical logicalAnd $ \tt -> LogicalOr <$ guard (tt == TOr)
+
+logicalAnd :: Parser Expr
+logicalAnd = binary Logical equality $ \tt -> LogicalAnd <$ guard (tt == TAnd)
 
 equality :: Parser Expr
-equality = binary comparison $ \case
+equality = binary Binary comparison $ \case
       TEqualEqual -> Just BinEq
       TBangEqual -> Just BinNe
       _ -> Nothing
 
 comparison :: Parser Expr
-comparison = binary term $ \case
+comparison = binary Binary term $ \case
     TGreater      -> Just BinGt
     TGreaterEqual -> Just BinGte
     TLess         -> Just BinLt
@@ -221,13 +229,13 @@ comparison = binary term $ \case
     _             -> Nothing
 
 term :: Parser Expr
-term = binary factor $ \case
+term = binary Binary factor $ \case
     TMinus -> Just BinSub
     TPlus  -> Just BinAdd
     _      -> Nothing
 
 factor :: Parser Expr
-factor = binary unary $ \case
+factor = binary Binary unary $ \case
     TSlash -> Just BinDiv
     TStar  -> Just BinMul
     _      -> Nothing

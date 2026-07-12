@@ -1,6 +1,7 @@
 module Lochs.AST
     ( AssignTarget(..)
     , BinaryOp(..)
+    , LogicalOp(..)
     , Expr(..)
     , Stmt(..)
     , UnaryOp(..)
@@ -20,6 +21,9 @@ data BinaryOp = BinAdd
               | BinLte
     deriving (Show)
 
+data LogicalOp = LogicalAnd | LogicalOr
+    deriving (Show)
+
 data UnaryOp = UnaryNeg | UnaryNot
     deriving (Show)
 
@@ -27,6 +31,7 @@ data AssignTarget = ATVariable String
     deriving (Show)
 
 data Expr = Binary   { exprLine :: Int, lhs :: !Expr, binOp :: !BinaryOp, rhs :: !Expr }
+          | Logical  { exprLine :: Int, lhs :: !Expr, logicalOp :: !LogicalOp, rhs :: !Expr }
           | Grouping { exprLine :: Int, expr :: !Expr }
           | Literal  { exprLine :: Int, value :: !R.Value }
           | Unary    { exprLine :: Int, unaryOp :: UnaryOp, expr :: !Expr }

@@ -109,6 +109,9 @@ eval = \case
         lhs <- eval l
         rhs <- eval r
         binary line op lhs rhs
+    Logical _ l op r -> do
+        lhs <- eval l
+        logical op lhs r
     Variable line name -> lookupVar line name
     Assign line name expr -> do
         val <- eval expr
@@ -168,3 +171,7 @@ binary  line BinLte l           _           = typeError line l "number"
 
 binary _line BinEq  l           r           = pure $ VBool   (isEqual l r)
 binary _line BinNe  l           r           = pure $ VBool   (not (isEqual l r))
+
+logical :: LogicalOp -> Value -> Expr -> Eval Value
+logical LogicalAnd val r = if isTruthy val then eval r else pure val
+logical LogicalOr  val r = if isTruthy val then pure val else eval r
