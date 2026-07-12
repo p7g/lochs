@@ -92,6 +92,11 @@ execStmt (VarDecl _line name expr) = do
     val <- traverse eval expr
     defineVar name $ fromMaybe VNil val
 execStmt (Block _line stmts) = newScope (execProgram stmts)
+execStmt (IfStmt _line cond cons alt) = do
+    val <- eval cond
+    if isTruthy val
+       then execStmt cons
+       else maybe (pure ()) execStmt alt
 
 eval :: Expr -> Eval Value
 eval = \case

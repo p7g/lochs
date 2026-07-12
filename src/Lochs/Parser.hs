@@ -143,6 +143,7 @@ statement = do
     case ty tok of
       TPrint     -> printStatement
       TLeftBrace -> block
+      TIf        -> ifStatement
       _          -> exprStatement
 
 printStatement :: Parser Stmt
@@ -163,6 +164,17 @@ block = token TLeftBrace >> loop []
                   case stmt of
                     Just stmt' -> loop (stmt':stmts)
                     Nothing    -> loop stmts
+
+ifStatement :: Parser Stmt
+ifStatement = do
+    iftok <- token TIf
+    _ <- token TLeftParen
+    cond <- expression
+    _ <- token TRightParen
+    body <- statement
+    elsetok <- match [TElse]
+    elsebody <- traverse (const statement) elsetok
+    pure $ IfStmt (line iftok) cond body elsebody
 
 exprStatement :: Parser Stmt
 exprStatement = do
