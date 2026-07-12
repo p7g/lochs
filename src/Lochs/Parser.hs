@@ -163,7 +163,13 @@ block = token TLeftBrace >> loop []
                   stmt <- declaration
                   case stmt of
                     Just stmt' -> loop (stmt':stmts)
-                    Nothing    -> loop stmts
+                    Nothing    -> do
+                        p <- peek
+                        case p of
+                          Nothing -> pure $ Block (line tok') (reverse stmts)
+                          Just tok
+                            | ty tok == TEOF -> pure $ Block (line tok') (reverse stmts)
+                            | otherwise      -> loop stmts
 
 ifStatement :: Parser Stmt
 ifStatement = do
