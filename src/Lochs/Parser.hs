@@ -149,7 +149,7 @@ declaration = tryDecl `catchError` (synchronize >> pure Nothing)
                 _    -> Just <$> statement
 
 funParams :: Parser [String]
-funParams = loop []
+funParams = token TLeftParen >> loop []
     where loop acc = do
             maybeTok <- peek
             case maybeTok of
@@ -170,7 +170,6 @@ funDecl :: String -> Parser Stmt
 funDecl kind = do
     tok <- token TFun
     name <- identifier (kind ++ " name")
-    _ <- token TLeftParen
     params <- funParams
     body <- snd <$> enterFunction block
     pure $ FunDecl (line tok) name params body
@@ -436,6 +435,7 @@ primary = peek >>= \case
         TNumber n     -> item >> pure (Literal l (LitNumber n))
         TString s     -> item >> pure (Literal l (LitString s))
         TIdentifier i -> item >> pure (Variable l i)
+        TFun          -> funExpr
         TLeftParen    -> do
             _ <- token TLeftParen
             expr <- expression
@@ -443,3 +443,10 @@ primary = peek >>= \case
             pure $ Grouping l expr
         _          -> unexpectedToken tok (Right "expression")
       where l = line tok
+
+funExpr :: Parser Expr
+funExpr = do
+    tok <- token TFun
+    params <- funParams
+    body <- snd <$> enterFunction block
+    pure $ Fun (line tok) params body

@@ -207,6 +207,10 @@ eval = \case
         args' <- traverse eval args
         fn <- ensureCallable line callee'
         call line fn args'
+    Fun _ params body -> do
+        env <- getEnv
+        u <- liftIO' newUnique
+        pure $ VLochsFunction u env "?" params body
 
 runtimeError :: Int -> String -> Eval a
 runtimeError line message = throwErr $ mkDiagnostic line "" message

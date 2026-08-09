@@ -43,6 +43,7 @@ data Expr = Binary   { exprLine :: Int, lhs :: !Expr, binOp :: !BinaryOp, rhs ::
           | Variable { exprLine :: Int, name :: !String }
           | Assign   { exprLine :: Int, target :: !String, expr :: !Expr }
           | Call     { exprLine :: Int, callee :: !Expr, arguments :: ![Expr] }
+          | Fun      { exprLine :: Int, funExprParams :: ![String], funExprBody :: ![Stmt] }
           deriving (Show)
 
 data Stmt = ExprStmt     { stmtLine :: Int, stmtExpr :: !Expr }
