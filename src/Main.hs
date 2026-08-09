@@ -50,6 +50,7 @@ run env code = do
              then exec env stmts >>= \case
                 Err d    -> putStrLn (show d) >> pure True
                 Ok ()    -> pure False
+                Return _ -> error "Unreachable: return outside function"
                 Break    -> error "Unreachable: break outside loop"
                 Continue -> error "Unreachable: continue outside loop"
              else pure True

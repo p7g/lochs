@@ -46,7 +46,7 @@ keyword = \case
     "else"     -> Just TElse
     "false"    -> Just TFalse
     "for"      -> Just TFor
-    "Fun"      -> Just TFun
+    "fun"      -> Just TFun
     "if"       -> Just TIf
     "nil"      -> Just TNil
     "or"       -> Just TOr

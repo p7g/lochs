@@ -1,21 +1,20 @@
 module Lochs.Parser (ParseResult(..), parse) where
 
-import Control.Monad (ap, guard)
+import Control.Monad (ap, guard, when)
 
 import Lochs.AST
 import Lochs.Diagnostic hiding (line)
-import Lochs.Runtime (Value(..))
 import Lochs.Scanner
 
 data ParseResult a = Failure   [Diagnostic] [Token]
                    | Success a [Diagnostic] [Token]
 
 parse :: [Token] -> ([Stmt], [Diagnostic])
-parse ts = case runParser program ts [] (Context False) of
+parse ts = case runParser program ts [] (Context False False) of
     Success stmts ds _ -> (stmts, ds)
     Failure ds _       -> ([], ds)
 
-data Context = Context { contextInLoop :: Bool }
+data Context = Context { contextInLoop :: Bool, contextInFunction :: Bool }
 
 newtype Parser a = Parser
     { runParser :: [Token] -> [Diagnostic] -> Context -> ParseResult a }
@@ -48,15 +47,25 @@ p `catchError` recovery = Parser $ \cs ds ctx ->
 inLoop :: Parser Bool
 inLoop = Parser $ \cs ds ctx -> Success (contextInLoop ctx) ds cs
 
+inFunction :: Parser Bool
+inFunction = Parser $ \cs ds ctx -> Success (contextInFunction ctx) ds cs
+
 modifyContext :: (Context -> Context) -> Parser a -> Parser a
 modifyContext f p = Parser $ \cs ds ctx -> runParser p cs ds (f ctx)
 
 enterLoop :: Parser a -> Parser a
 enterLoop p = modifyContext (\ctx -> ctx { contextInLoop = True }) p
 
+enterFunction :: Parser a -> Parser a
+enterFunction p = modifyContext (\ctx -> ctx { contextInFunction = True }) p
+
 parseError :: Int -> String -> String -> Parser a
 parseError line loc message = Parser $ \cs ds _ ->
     Failure (ds ++ [mkDiagnostic line loc message]) cs
+
+addDiagnostic :: Int -> String -> String -> Parser ()
+addDiagnostic line loc message = Parser $ \cs ds _ -> Success () (ds ++ [diag]) cs
+    where diag = mkDiagnostic line loc message
 
 unexpectedToken :: Token -> Either TokenType String -> Parser a
 unexpectedToken got expected = parseError (line got) loc message
@@ -96,6 +105,12 @@ filterMap diagMsg predicate = do
             Nothing -> unexpectedToken tok' (Right diagMsg)
             Just x  -> item >> pure x
 
+identifier :: String -> Parser String
+identifier msg = filterMap msg $ \tok ->
+    case ty tok of
+      TIdentifier ident -> Just ident
+      _                 -> Nothing
+
 matchWith :: (Token -> Maybe a) -> Parser (Maybe (Token, a))
 matchWith f = do
     maybeTok <- peek
@@ -130,15 +145,40 @@ declaration = tryDecl `catchError` (synchronize >> pure Nothing)
             Just tok <- peek
             case ty tok of
                 TVar -> Just <$> varDecl
+                TFun -> Just <$> funDecl "function"
                 _    -> Just <$> statement
+
+funParams :: Parser [String]
+funParams = loop []
+    where loop acc = do
+            maybeTok <- peek
+            case maybeTok of
+              Nothing -> parseError 0 " at end" "Expected right paren"
+              Just tok
+                | ty tok == TRightParen -> item >> pure (reverse acc)
+                | otherwise -> do
+                  when (length acc >= 255) $ do
+                      addDiagnostic (line tok) "" "Can't have more than 255 parameters"
+                  name <- identifier "identifier"
+                  comma <- match [TComma]
+                  let acc' = name : acc
+                  case comma of
+                    Just _ -> loop acc'
+                    Nothing -> token TRightParen >> pure (reverse acc')
+
+funDecl :: String -> Parser Stmt
+funDecl kind = do
+    tok <- token TFun
+    name <- identifier (kind ++ " name")
+    _ <- token TLeftParen
+    params <- funParams
+    body <- snd <$> enterFunction block
+    pure $ FunDecl (line tok) name params body
 
 varDecl :: Parser Stmt
 varDecl = do
     tok <- token TVar
-    name <- filterMap "identifier" $ \tok' ->
-        case ty tok' of
-          TIdentifier ident -> Just ident
-          _                 -> Nothing
+    name <- identifier "identifier"
     eq <- match [TEqual]
     expr <- case eq of
       Nothing -> pure Nothing
@@ -151,12 +191,13 @@ statement = do
     Just tok <- peek
     case ty tok of
       TPrint     -> printStatement
-      TLeftBrace -> block
+      TLeftBrace -> uncurry Block <$> block
       TIf        -> ifStatement
       TWhile     -> whileStatement
       TFor       -> forStatement
       TBreak     -> breakStatement
       TContinue  -> continueStatement
+      TReturn    -> returnStatement
       _          -> exprStatement
 
 printStatement :: Parser Stmt
@@ -166,12 +207,12 @@ printStatement = do
     _ <- token TSemicolon
     pure $ PrintStmt (line tok) expr
 
-block :: Parser Stmt
+block :: Parser (Int, [Stmt])
 block = token TLeftBrace >> loop []
     where loop stmts = do
             Just tok' <- peek
             case ty tok' of
-              TRightBrace -> item >> pure (Block (line tok') (reverse stmts))
+              TRightBrace -> item >> pure ((line tok'), (reverse stmts))
               _           -> do
                   stmt <- declaration
                   case stmt of
@@ -179,9 +220,9 @@ block = token TLeftBrace >> loop []
                     Nothing    -> do
                         p <- peek
                         case p of
-                          Nothing -> pure $ Block (line tok') (reverse stmts)
+                          Nothing -> pure $ ((line tok'), (reverse stmts))
                           Just tok
-                            | ty tok == TEOF -> pure $ Block (line tok') (reverse stmts)
+                            | ty tok == TEOF -> pure $ ((line tok'), (reverse stmts))
                             | otherwise      -> loop stmts
 
 ifStatement :: Parser Stmt
@@ -212,9 +253,11 @@ desugarContinue incr stmt = case stmt of
         IfStmt line cond (desugarContinue incr cons) (fmap (desugarContinue incr) alt)
     WhileStmt _ _ _   -> stmt
     BreakStmt _       -> stmt
+    ReturnStmt _ _    -> stmt
     PrintStmt _ _     -> stmt
     ExprStmt _ _      -> stmt
     VarDecl _ _ _     -> stmt
+    FunDecl _ _ _ _   -> stmt
 
 forStatement :: Parser Stmt
 forStatement = do
@@ -229,7 +272,7 @@ forStatement = do
             _          -> Just <$> exprStatement
 
     cond <- match [TSemicolon] >>= \case
-        Just tok -> pure $ Literal (line tok) (VBool True)
+        Just tok -> pure $ Literal (line tok) (LitBool True)
         Nothing  -> do
             expr <- expression
             _ <- token TSemicolon
@@ -255,18 +298,29 @@ breakStatement = do
     tok <- token TBreak
     l <- inLoop
     _ <- token TSemicolon
-    if l
-       then pure $ BreakStmt (line tok)
-       else parseError (line tok) "" "Break outside loop"
+    when (not l) $ addDiagnostic (line tok) "" "Break outside loop"
+    pure $ BreakStmt (line tok)
 
 continueStatement :: Parser Stmt
 continueStatement = do
     tok <- token TContinue
     l <- inLoop
     _ <- token TSemicolon
-    if l
-       then pure $ ContinueStmt (line tok)
-       else parseError (line tok) "" "continue outside loop"
+    when (not l) $ addDiagnostic (line tok) "" "continue outside loop"
+    pure $ ContinueStmt (line tok)
+
+returnStatement :: Parser Stmt
+returnStatement = do
+    tok <- token TReturn
+    f <- inFunction
+    when (not f) $ addDiagnostic (line tok) "" "return outside function"
+    s <- match [TSemicolon]
+    case s of
+      Just _ -> pure $ ReturnStmt (line tok) Nothing
+      _ -> do
+          e <- expression
+          _ <- token TSemicolon
+          pure $ ReturnStmt (line tok) (Just e)
 
 exprStatement :: Parser Stmt
 exprStatement = do
@@ -287,8 +341,9 @@ assignment = do
           value <- assignment
           case lhs of
             Variable l n -> pure $ Assign l n value
-            _            ->
-                parseError (exprLine lhs) "" ("Can't assign to " ++ show lhs)
+            _            -> do
+                addDiagnostic (exprLine lhs) "" ("Can't assign to " ++ show lhs)
+                pure $ Assign 0 "dummy" value
 
 type BinaryLike op = Int -> Expr -> op -> Expr -> Expr
 
@@ -339,17 +394,47 @@ unary = do
           TBang  -> Just UnaryNot
           TMinus -> Just UnaryNeg
           _      -> Nothing
-    maybe primary (\(tok, op) -> unary >>= pure . Unary (line tok) op) m
+    maybe call (\(tok, op) -> unary >>= pure . Unary (line tok) op) m
+
+call :: Parser Expr
+call = primary >>= oneCall
+    where
+        oneCall callee = do
+            lparen <- match [TLeftParen]
+            case lparen of
+              Nothing -> pure callee
+              Just tok -> do
+                  args <- arguments []
+                  oneCall (Call (line tok) callee args)
+        arguments acc = do
+            maybeRparen <- peek
+            case maybeRparen of
+              Nothing -> parseError 0 " at end" "Expected right paren"
+              Just tok
+                | ty tok == TRightParen -> do
+                    _ <- item
+                    when (length acc > 255) $
+                        addDiagnostic (line tok) "" "Can't have more than 255 arguments"
+                    pure $ reverse acc
+                | otherwise -> do
+                    acc' <- expression >>= pure . (:acc)
+                    nextTok <- peek
+                    case nextTok of
+                      Just tok'
+                        | ty tok' == TComma -> item >> arguments acc'
+                        | ty tok' == TRightParen -> arguments acc'
+                        | otherwise -> parseError (line tok') "" "Expected comma or right paren"
+                      Nothing -> parseError 0 " at end" "Expected comma or right paren"
 
 primary :: Parser Expr
 primary = peek >>= \case
     Nothing -> parseError 0 " at end" "Expected token"
     Just tok -> case ty tok of
-        TTrue         -> item >> pure (Literal l (VBool True))
-        TFalse        -> item >> pure (Literal l (VBool False))
-        TNil          -> item >> pure (Literal l VNil)
-        TNumber n     -> item >> pure (Literal l (VNumber n))
-        TString s     -> item >> pure (Literal l (VString s))
+        TTrue         -> item >> pure (Literal l (LitBool True))
+        TFalse        -> item >> pure (Literal l (LitBool False))
+        TNil          -> item >> pure (Literal l LitNil)
+        TNumber n     -> item >> pure (Literal l (LitNumber n))
+        TString s     -> item >> pure (Literal l (LitString s))
         TIdentifier i -> item >> pure (Variable l i)
         TLeftParen    -> do
             _ <- token TLeftParen

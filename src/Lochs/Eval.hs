@@ -1,9 +1,12 @@
-module Lochs.Eval (Env, EvalResult(..), mkEnv, exec) where
+module Lochs.Eval (Env, EvalResult(..), exec, mkEnv) where
 
 import Control.Monad (ap, when)
+import Data.Foldable (traverse_)
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef, writeIORef)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
+import Data.Unique (newUnique)
+import GHC.Clock (getMonotonicTime)
 
 import Lochs.AST
 import Lochs.Diagnostic
@@ -12,6 +15,7 @@ import Lochs.Runtime
 data EvalResult a = Ok a
                   | Break
                   | Continue
+                  | Return Value
                   | Err Diagnostic
 
 instance Functor EvalResult where
@@ -19,19 +23,16 @@ instance Functor EvalResult where
         Ok a     -> Ok (f a)
         Break    -> Break
         Continue -> Continue
+        Return v -> Return v
         Err d    -> Err d
 
-exec :: Env -> [Stmt] -> IO (EvalResult ())
-exec env stmts = runEval (execProgram stmts) env
-
-data Env = Env
-    { values :: IORef (Map.Map String (IORef Value))
-    , parent :: Maybe Env
-    }
+initialEnv :: [(String, Value)]
+initialEnv = [("clock", VNativeFunction FClock)]
 
 mkEnv :: IO Env
 mkEnv = do
-    ref <- newIORef Map.empty
+    m <- Map.fromList <$> traverse (traverse newIORef) initialEnv
+    ref <- newIORef m
     pure $ Env ref Nothing
 
 newtype Eval a = Eval { runEval :: Env -> IO (EvalResult a) }
@@ -49,6 +50,7 @@ instance Monad Eval where
             Ok a     -> runEval (f a) env
             Break    -> pure Break
             Continue -> pure Continue
+            Return v -> pure (Return v)
             Err d    -> pure (Err d)
 
 liftIO' :: IO a -> Eval a
@@ -64,6 +66,9 @@ observe (Eval g) = Eval $ \env -> do
 
 reraise :: EvalResult a -> Eval a
 reraise r = Eval $ \_ -> pure r
+
+lochsReturn :: Value -> Eval a
+lochsReturn v = Eval $ \_ -> pure (Return v)
 
 getEnv :: Eval Env
 getEnv = Eval $ \env -> pure (Ok env)
@@ -103,6 +108,9 @@ assignVar line name val = do
     ref <- varRef line name env
     liftIO' $ val `seq` writeIORef ref val
 
+exec :: Env -> [Stmt] -> IO (EvalResult ())
+exec env stmts = runEval (execProgram stmts) env
+
 execProgram :: [Stmt] -> Eval ()
 execProgram []     = pure ()
 execProgram (x:xs) = execStmt x >> execProgram xs
@@ -115,6 +123,10 @@ execStmt (ExprStmt  _line expr) = eval expr >> pure ()
 execStmt (VarDecl _line name expr) = do
     val <- traverse eval expr
     defineVar name $ fromMaybe VNil val
+execStmt (FunDecl _line name params body) = do
+    env <- getEnv
+    u <- liftIO' newUnique
+    defineVar name (VLochsFunction u env name params body)
 execStmt (Block _line stmts) = newScope (execProgram stmts)
 execStmt (IfStmt _line cond cons alt) = do
     val <- eval cond
@@ -128,13 +140,52 @@ execStmt w@(WhileStmt _line cond body) = do
             Ok _     -> execStmt w
             Continue -> execStmt w
             Break    -> pure ()
+            Return v -> lochsReturn v
             Err d    -> reraise (Err d)
 execStmt (BreakStmt _)    = Eval $ \_ -> pure Break
 execStmt (ContinueStmt _) = Eval $ \_ -> pure Continue
+execStmt (ReturnStmt _ e) = do
+    val <- fromMaybe (pure VNil) $ fmap eval e
+    lochsReturn val
+
+callNative :: NativeFunctionID -> [Value] -> Eval Value
+callNative FClock _ = liftIO' getMonotonicTime >>= pure . VNumber
+
+call' :: Callable -> [Value] -> Eval Value
+call' (NativeFunction _ funId) args = callNative funId args
+call' (LochsFunction _ env params body) args = do
+    withEnv env . newScope $ do
+        traverse_ (uncurry defineVar) (zip params args)
+        observe (execProgram body) >>= \case
+            Ok _     -> pure VNil
+            Continue -> error "Unreachable: continue crossing function boundary"
+            Break    -> error "Unreachable: break crossing function boundary"
+            Return v -> pure v
+            Err d    -> reraise (Err d)
+
+call :: Int -> Callable -> [Value] -> Eval Value
+call line callable args
+    | length args == arity callable = call' callable args
+    | otherwise                     = runtimeError line message
+        where message = "Expected " ++ show (arity callable)
+                ++ " arguments but got " ++ show (length args)
+
+ensureCallable :: Int -> Value -> Eval Callable
+ensureCallable _ (VNativeFunction funId) =
+    pure $ NativeFunction (nativeFunctionArity funId) funId
+ensureCallable _ (VLochsFunction _ env _ params body) =
+    pure $ LochsFunction (length params) env params body
+ensureCallable l v                      = typeError l v "function"
+
+hydrate :: LitValue -> Value
+hydrate (LitBool b) = VBool b
+hydrate (LitNumber n) = VNumber n
+hydrate (LitString s) = VString s
+hydrate LitNil = VNil
 
 eval :: Expr -> Eval Value
 eval = \case
-    Literal  _line v      -> pure v
+    Literal  _line v      -> pure $ hydrate v
     Grouping _line e      -> eval e
     Unary    line  op e   -> do
         operand <- eval e
@@ -151,6 +202,14 @@ eval = \case
         val <- eval expr
         assignVar line name val
         pure val
+    Call line callee args -> do
+        callee' <- eval callee
+        args' <- traverse eval args
+        fn <- ensureCallable line callee'
+        call line fn args'
+
+runtimeError :: Int -> String -> Eval a
+runtimeError line message = throwErr $ mkDiagnostic line "" message
 
 typeError :: Int -> Value -> String -> Eval a
 typeError line val expected = throwErr $
