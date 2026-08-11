@@ -1,16 +1,19 @@
 module Lochs.Runtime where
 
+import Data.Array.IO (IOArray)
 import Data.IORef (IORef)
 import Data.List (stripPrefix)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Unique (Unique)
 
-import Lochs.AST (ResolvedName, Stmt)
+import Lochs.AST (ResolvedName, Stmt, resolvedNameText)
 
-data Env = Env
-    { values :: IORef (Map.Map String (IORef Value))
-    , parent :: Maybe Env
+newtype GlobalEnv = GlobalEnv (IORef (Map.Map String (IORef Value)))
+
+data LocalEnv = LocalEnv
+    { values :: IOArray Int Value
+    , parent :: Maybe LocalEnv
     }
 
 data Value = VBool   !Bool
@@ -18,7 +21,14 @@ data Value = VBool   !Bool
            | VString !String
            | VNil
            | VNativeFunction !NativeFunctionID
-           | VLochsFunction Unique Env String ![String] ![Stmt ResolvedName]
+           | VLochsFunction
+               { unique :: !Unique
+               , closure :: !(Maybe LocalEnv)
+               , name :: !(Maybe ResolvedName)
+               , funParams :: ![ResolvedName]
+               , funBody :: ![Stmt ResolvedName]
+               , numVars :: !Int
+               }
 
 instance Eq Value where
     (VBool a) == (VBool b) = a == b
@@ -26,7 +36,7 @@ instance Eq Value where
     (VString a) == (VString b) = a == b
     VNil == VNil = True
     (VNativeFunction a) == (VNativeFunction b) = a == b
-    (VLochsFunction a _ _ _ _) == (VLochsFunction b _ _ _ _) = a == b
+    (VLochsFunction a _ _ _ _ _) == (VLochsFunction b _ _ _ _ _) = a == b
     _ == _ = False
 
 data NativeFunctionID = FClock
@@ -36,7 +46,13 @@ nativeFunctionArity :: NativeFunctionID -> Int
 nativeFunctionArity FClock = 0
 
 data Callable = NativeFunction { arity :: !Int, funId :: NativeFunctionID }
-              | LochsFunction  { arity :: !Int, env :: !Env, params :: ![String], body :: ![Stmt ResolvedName] }
+              | LochsFunction
+                  { arity :: !Int
+                  , env :: !(Maybe LocalEnv)
+                  , params :: ![ResolvedName]
+                  , body :: ![Stmt ResolvedName]
+                  , funVars :: !Int
+                  }
 
 instance Show NativeFunctionID where
     show = \case
@@ -49,7 +65,8 @@ instance Show Value where
         VString s -> s
         VNil      -> "nil"
         VNativeFunction f -> "<fn " ++ show f ++ ">"
-        VLochsFunction _ _ name _ _ -> "<fn " ++ name ++ ">"
+        VLochsFunction _ _ name _ _ _ ->
+            "<fn " ++ fromMaybe "<anon>" (resolvedNameText <$> name) ++ ">"
 
 typeName :: Value -> String
 typeName = \case
@@ -58,7 +75,7 @@ typeName = \case
     VString _ -> "string"
     VNil      -> "nil"
     VNativeFunction _ -> "function"
-    VLochsFunction _ _ _ _ _ -> "function"
+    VLochsFunction _ _ _ _ _ _ -> "function"
 
 stringify :: Value -> String
 stringify = \case

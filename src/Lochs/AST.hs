@@ -8,6 +8,7 @@ module Lochs.AST
     , Stmt(..)
     , UnaryOp(..)
     , UnresolvedName(..)
+    , resolvedNameText
     ) where
 
 data BinaryOp = BinAdd
@@ -37,8 +38,14 @@ data LitValue = LitBool Bool
               | LitNil
               deriving (Show)
 
-data UnresolvedName = UnresolvedName !String deriving (Show)
-data ResolvedName = Local !Int !String | Global !String deriving (Show)
+newtype UnresolvedName = UnresolvedName String deriving (Show)
+data ResolvedName = Local !Int !Int !String
+                  | Global !String
+                  deriving (Show)
+
+resolvedNameText :: ResolvedName -> String
+resolvedNameText (Local _ _ n) = n
+resolvedNameText (Global n)    = n
 
 data Expr a
     = Binary   { exprLine :: !Int, lhs :: !(Expr a), binOp :: !BinaryOp, rhs :: !(Expr a) }
@@ -49,15 +56,15 @@ data Expr a
     | Variable { exprLine :: !Int, name :: !a }
     | Assign   { exprLine :: !Int, target :: !a, expr :: !(Expr a) }
     | Call     { exprLine :: !Int, callee :: !(Expr a), arguments :: ![(Expr a)] }
-    | Fun      { exprLine :: !Int, funExprParams :: ![String], funExprBody :: ![Stmt a] }
+    | Fun      { exprLine :: !Int, funExprParams :: ![a], funExprBody :: ![Stmt a], funExprVars :: !Int }
     deriving (Show)
 
 data Stmt a
     = ExprStmt     { stmtLine :: !Int, stmtExpr :: !(Expr a) }
     | PrintStmt    { stmtLine :: !Int, stmtExpr :: !(Expr a) }
-    | VarDecl      { stmtLine :: !Int, varName :: !String, init :: !(Maybe (Expr a)) }
-    | FunDecl      { stmtLine :: !Int, funName :: !String, params :: ![String], funBody :: ![Stmt a] }
-    | Block        { stmtLine :: !Int, stmts :: ![Stmt a] }
+    | VarDecl      { stmtLine :: !Int, varName :: !a, init :: !(Maybe (Expr a)) }
+    | FunDecl      { stmtLine :: !Int, funName :: !a, params :: ![a], funBody :: ![Stmt a], nVars :: !Int }
+    | Block        { stmtLine :: !Int, stmts :: ![Stmt a], nVars :: !Int }
     | IfStmt       { stmtLine :: !Int, cond :: !(Expr a), cons :: !(Stmt a), alt :: !(Maybe (Stmt a)) }
     | WhileStmt    { stmtLine :: !Int, cond :: !(Expr a), body :: !(Stmt a) }
     | BreakStmt    { stmtLine :: !Int }

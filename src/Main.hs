@@ -20,13 +20,13 @@ main = getArgs >>= \case
         hPutStrLn stderr "Usage: lochs [script]"
         exitWith $ ExitFailure 64
 
-runFile :: String -> Env -> IO ()
+runFile :: String -> GlobalEnv -> IO ()
 runFile file env = do
     code <- readFile file
     hadError <- run env code
     when hadError $ exitWith (ExitFailure 65)
 
-runPrompt :: Env -> IO ()
+runPrompt :: GlobalEnv -> IO ()
 runPrompt env = catchIOError loop handler
     where
         loop = do
@@ -37,7 +37,7 @@ runPrompt env = catchIOError loop handler
             loop
         handler e = if isEOFError e then putStrLn "" else ioError e
 
-run :: Env -> String -> IO Bool
+run :: GlobalEnv -> String -> IO Bool
 run env code = do
     let (tokens, diags) = scan code
     traverse_ (putStrLn . show) diags

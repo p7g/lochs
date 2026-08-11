@@ -3,6 +3,7 @@ module Lochs.Resolver (resolve) where
 import Control.Monad (when)
 import Data.Foldable (traverse_)
 import Data.Map qualified as Map
+import Data.Maybe (fromMaybe)
 
 import Lochs.AST
 import Lochs.Diagnostic
@@ -12,7 +13,9 @@ resolve ss =
     let (ss', _, d) = runResolve (traverse resolveStmt ss) [] (Context NoFunction False)
      in (ss', d)
 
-type Env = [Map.Map String Bool]
+data EnvEntry = EnvEntry { defined :: Bool, index :: Int }
+type EnvMap = Map.Map String EnvEntry
+type Env = [EnvMap]
 
 data FunctionType = Function | NoFunction
     deriving (Eq)
@@ -67,31 +70,39 @@ enterScope = modifyEnv (Map.empty:)
 exitScope :: Resolve ()
 exitScope = modifyEnv (drop 1)
 
-setLocal :: String -> Bool -> Env -> Env
-setLocal _ _ [] = []
-setLocal n v (m:ms) = Map.insert n v m : ms
+scopeSize :: Resolve Int
+scopeSize = do
+    env <- getEnv
+    case env of
+      [] -> pure 0
+      m:_ -> pure $ Map.size m
+
+modifyLocal :: (EnvMap -> EnvMap) -> Env -> Env
+modifyLocal _ [] = []
+modifyLocal f (m:ms) = f m : ms
 
 checkExisting :: Int -> String -> Env -> Resolve ()
 checkExisting line name (m:_) | Map.member name m = 
     diag (mkDiagnostic line "" "Already a variable with this name in scope")
 checkExisting _ _ _ = pure ()
 
-declare :: Int -> String -> Resolve ()
-declare line name = do
+declare :: Int -> UnresolvedName -> Resolve ()
+declare line (UnresolvedName name) = do
     env <- getEnv
     checkExisting line name env
-    modifyEnv $ setLocal name False
+    modifyEnv $ modifyLocal (\m -> Map.insert name (EnvEntry False (Map.size m)) m)
 
-define :: String -> Resolve ()
-define name = modifyEnv $ setLocal name True
+define :: UnresolvedName -> Resolve ()
+define (UnresolvedName name) = modifyEnv $ modifyLocal (Map.adjust (\e -> e { defined = True }) name)
 
-countDepth :: String -> Env -> Maybe Int
+countDepth :: String -> Env -> Maybe (Int, Int)
 countDepth name = loop 0
     where loop depth = \case
             [] -> Nothing
-            m:ms
-              | Map.member name m -> Just depth
-              | otherwise         -> loop (depth + 1) ms
+            m:ms ->
+                case Map.lookup name m of
+                  Just e -> Just (depth, index e)
+                  Nothing -> loop (depth + 1) ms
 
 lookupName :: Int -> UnresolvedName -> Resolve ResolvedName
 lookupName line (UnresolvedName name) = do
@@ -99,31 +110,36 @@ lookupName line (UnresolvedName name) = do
     case env of
       [] -> pure $ Global name
       m:_ -> do
-          when (Map.lookup name m == Just False) $
+          let undef = fromMaybe False (not . defined <$> Map.lookup name m)
+          when undef $
             diag (mkDiagnostic line "" "Can't read local variable in its own initializer")
-          pure $ maybe (Global name) (flip Local name) (countDepth name env)
+          pure $ case countDepth name env of
+            Just (depth, index) -> Local depth index name
+            Nothing -> Global name
 
-resolveFun :: FunctionType -> Int -> (Maybe String) -> [String]
-           -> [Stmt UnresolvedName] -> Resolve [Stmt ResolvedName]
-resolveFun ty line name params body = do
-    traverse_ (declare line) name
-    traverse_ define name
+resolveFun :: Int -> FunctionType -> [UnresolvedName] -> [Stmt UnresolvedName]
+           -> Resolve ([Stmt ResolvedName], Int, [ResolvedName])
+resolveFun line ty params body = do
     enterScope
+    traverse_ (declare line) params
     traverse_ define params
     body' <- modifyContext (\ctx -> ctx { funType = ty, inLoop = False }) $
         traverse resolveStmt body
+    nvars <- scopeSize
+    params' <- traverse (lookupName line) params
     exitScope
-    pure $ body'
+    pure (body', nvars, params')
 
 resolveStmt :: Stmt UnresolvedName -> Resolve (Stmt ResolvedName)
 resolveStmt = \case
     ExprStmt l e    -> ExprStmt l <$> resolveExpr e
     PrintStmt l e   -> PrintStmt l <$> resolveExpr e
-    Block l s       -> do
+    Block l s _     -> do
         enterScope
         s' <- traverse resolveStmt s
+        nvars <- scopeSize
         exitScope
-        pure $ Block l s'
+        pure $ Block l s' nvars
     IfStmt l c t e  -> IfStmt l <$> resolveExpr c <*> resolveStmt t <*> traverse resolveStmt e
     WhileStmt l c b -> WhileStmt l <$> resolveExpr c <*> withinLoop (resolveStmt b)
     BreakStmt l     -> do
@@ -131,22 +147,28 @@ resolveStmt = \case
         when (not loop) $
             diag (mkDiagnostic l "" "break outside loop")
         pure $ BreakStmt l
-    ContinueStmt l  -> do
+    ContinueStmt l -> do
         loop <- readContext inLoop
         when (not loop) $
             diag (mkDiagnostic l "" "continue outside loop")
         pure $ ContinueStmt l
-    ReturnStmt l e  -> do
+    ReturnStmt l e -> do
         f <- readContext funType
         when (f == NoFunction) $
             diag (mkDiagnostic l "" "Return outside function")
         ReturnStmt l <$> traverse resolveExpr e
-    VarDecl l n e   -> do
+    VarDecl l n e -> do
         declare l n
         e' <- traverse resolveExpr e
         define n
-        pure $ VarDecl l n e'
-    FunDecl l n p b -> FunDecl l n p <$> resolveFun Function l (Just n) p b
+        n' <- lookupName l n
+        pure $ VarDecl l n' e'
+    FunDecl l n p b _ -> do
+        declare l n
+        define n
+        n' <- lookupName l n
+        (b', nvars, p') <- resolveFun l Function p b
+        pure $ FunDecl l n' p' b' nvars
 
 resolveExpr :: Expr UnresolvedName -> Resolve (Expr ResolvedName)
 resolveExpr = \case
@@ -158,4 +180,6 @@ resolveExpr = \case
     Variable l n    -> Variable l <$> lookupName l n
     Assign l n e    -> Assign l <$> lookupName l n <*> resolveExpr e
     Call l c a      -> Call l <$> resolveExpr c <*> traverse resolveExpr a
-    Fun l p b       -> Fun l p <$> resolveFun Function l Nothing p b
+    Fun l p b _     -> do
+        (b', nvars, p') <- resolveFun l Function p b
+        pure $ Fun l p' b' nvars

@@ -135,7 +135,7 @@ declaration = tryDecl `catchError` (synchronize >> pure Nothing)
                 TFun -> Just <$> funDecl "function"
                 _    -> Just <$> statement
 
-funParams :: Parser [String]
+funParams :: Parser [UnresolvedName]
 funParams = token TLeftParen >> loop []
     where loop acc = do
             maybeTok <- peek
@@ -148,7 +148,7 @@ funParams = token TLeftParen >> loop []
                       addDiagnostic (line tok) "" "Can't have more than 255 parameters"
                   name <- identifier "identifier"
                   comma <- match [TComma]
-                  let acc' = name : acc
+                  let acc' = UnresolvedName name : acc
                   case comma of
                     Just _ -> loop acc'
                     Nothing -> token TRightParen >> pure (reverse acc')
@@ -159,7 +159,7 @@ funDecl kind = do
     name <- identifier (kind ++ " name")
     params <- funParams
     (_, body) <- block
-    pure $ FunDecl (line tok) name params body
+    pure $ FunDecl (line tok) (UnresolvedName name) params body 0
 
 varDecl :: Parser Stmt
 varDecl = do
@@ -170,14 +170,14 @@ varDecl = do
       Nothing -> pure Nothing
       Just _  -> fmap Just expression
     _ <- token TSemicolon
-    pure $ VarDecl (line tok) name expr
+    pure $ VarDecl (line tok) (UnresolvedName name) expr
 
 statement :: Parser Stmt
 statement = do
     Just tok <- peek
     case ty tok of
       TPrint     -> printStatement
-      TLeftBrace -> uncurry Block <$> block
+      TLeftBrace -> flip (uncurry Block) 0 <$> block
       TIf        -> ifStatement
       TWhile     -> whileStatement
       TFor       -> forStatement
@@ -233,8 +233,8 @@ whileStatement = do
 
 desugarContinue :: Expr -> Stmt -> Stmt
 desugarContinue incr stmt = case stmt of
-    ContinueStmt line -> Block line [ExprStmt (exprLine incr) incr, stmt]
-    Block line stmts  -> Block line (map (desugarContinue incr) stmts)
+    ContinueStmt line -> Block line [ExprStmt (exprLine incr) incr, stmt] 0
+    Block line stmts nvars  -> Block line (map (desugarContinue incr) stmts) nvars
     IfStmt line cond cons alt ->
         IfStmt line cond (desugarContinue incr cons) (fmap (desugarContinue incr) alt)
     WhileStmt _ _ _   -> stmt
@@ -243,7 +243,7 @@ desugarContinue incr stmt = case stmt of
     PrintStmt _ _     -> stmt
     ExprStmt _ _      -> stmt
     VarDecl _ _ _     -> stmt
-    FunDecl _ _ _ _   -> stmt
+    FunDecl _ _ _ _ _ -> stmt
 
 forStatement :: Parser Stmt
 forStatement = do
@@ -271,12 +271,12 @@ forStatement = do
     _ <- token TRightParen
     body <- statement >>= \s ->
         case inc of
-          Just i -> pure $ Block (stmtLine s) [desugarContinue i s, ExprStmt (exprLine i) i]
+          Just i -> pure $ Block (stmtLine s) [desugarContinue i s, ExprStmt (exprLine i) i] 0
           Nothing -> pure s
 
     let w = WhileStmt (line fortok) cond body
     pure $ case initializer of
-      Just i  -> Block (line fortok) [i, w]
+      Just i  -> Block (line fortok) [i, w] 0
       Nothing -> w
 
 breakStatement :: Parser Stmt
@@ -430,4 +430,4 @@ funExpr = do
     tok <- token TFun
     params <- funParams
     (_, body) <- block
-    pure $ Fun (line tok) params body
+    pure $ Fun (line tok) params body 0

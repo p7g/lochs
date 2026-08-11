@@ -1,8 +1,9 @@
-module Lochs.Eval (Env, EvalResult(..), exec, mkEnv) where
+module Lochs.Eval (EvalResult(..), GlobalEnv, exec, mkEnv) where
 
 import Control.Monad (ap, when)
+import Data.Array.MArray (newArray_, readArray, writeArray)
 import Data.Foldable (traverse_)
-import Data.IORef (IORef, modifyIORef, newIORef, readIORef, writeIORef)
+import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Unique (newUnique)
@@ -29,15 +30,15 @@ instance Functor EvalResult where
 initialEnv :: [(String, Value)]
 initialEnv = [("clock", VNativeFunction FClock)]
 
-mkEnv :: IO Env
+mkEnv :: IO GlobalEnv
 mkEnv = do
     m <- Map.fromList <$> traverse (traverse newIORef) initialEnv
     ref <- newIORef m
-    pure $ Env ref Nothing
+    pure $ GlobalEnv ref
 
 data EvalContext = EvalContext
-    { ctxGlobalEnv :: Env
-    , ctxLocalEnv :: Env
+    { ctxGlobalEnv :: GlobalEnv
+    , ctxLocalEnv :: Maybe LocalEnv
     }
 
 newtype Eval a = Eval { runEval :: EvalContext -> IO (EvalResult a) }
@@ -75,57 +76,69 @@ reraise r = Eval $ \_ -> pure r
 lochsReturn :: Value -> Eval a
 lochsReturn v = Eval $ \_ -> pure (Return v)
 
-getEnv :: Eval Env
+getEnv :: Eval (Maybe LocalEnv)
 getEnv = Eval $ \ctx -> pure (Ok $ ctxLocalEnv ctx)
 
-getEnvAt :: Int -> Eval Env
+getEnvAt :: Int -> Eval (Maybe LocalEnv)
 getEnvAt 0 = getEnv
 getEnvAt n = do
-    p <- parent <$> getEnv
+    p <- (>>= parent) <$> getEnv
     case p of
       Nothing -> error "Name resolution error"
       Just p' -> withEnv p' $ getEnvAt (n - 1)
 
-getGlobalEnv :: Eval Env
+getGlobalEnv :: Eval GlobalEnv
 getGlobalEnv = Eval $ \ctx -> pure (Ok $ ctxGlobalEnv ctx)
 
-withEnv :: Env -> Eval a -> Eval a
-withEnv env (Eval g) = Eval $ \ctx -> g (ctx { ctxLocalEnv = env })
+withEnv :: LocalEnv -> Eval a -> Eval a
+withEnv env (Eval g) = Eval $ \ctx -> g (ctx { ctxLocalEnv = Just env })
 
-newScope :: Eval a -> Eval a
-newScope action = do
+newScope :: Int -> Eval a -> Eval a
+newScope nvars action = do
     parentEnv <- getEnv
-    ref <- liftIO' $ newIORef Map.empty
-    withEnv (Env ref (Just parentEnv)) action
+    arr <- liftIO' $ newArray_ (0, nvars)
+    withEnv (LocalEnv arr parentEnv) action
 
-defineVar :: String -> Value -> Eval ()
-defineVar name val = do
-    env <- getEnv
+defineVar :: ResolvedName -> Value -> Eval ()
+defineVar (Global name) val = do
+    GlobalEnv env <- getGlobalEnv
     valCell <- liftIO' $ val `seq` newIORef val
-    liftIO' $ modifyIORef (values env) (Map.insert name valCell)
+    liftIO' $ modifyIORef env (Map.insert name valCell)
+defineVar (Local depth index _) val = do
+    env <- getEnvAt depth
+    case env of
+      Nothing -> error "Name resolution error"
+      Just env' -> liftIO' $ writeArray (values env') index val
 
-varRef :: Int -> ResolvedName -> Eval (IORef Value)
-varRef line resolved = do
-    (env, name) <- case resolved of
-                     Local depth name -> (,name) <$> getEnvAt depth
-                     Global name      -> (,name) <$> getGlobalEnv
-    m <- liftIO' $ readIORef (values env)
+data VarRef = VarRef { readRef :: Eval Value, writeRef :: Value -> Eval () }
+
+varRef :: Int -> ResolvedName -> Eval VarRef
+varRef line (Global name) = do
+    GlobalEnv env <- getGlobalEnv
+    m <- liftIO' $ readIORef env
     case Map.lookup name m of
-      Just v -> pure v
+      Just v -> pure $ VarRef (liftIO' (readIORef v)) (liftIO' . writeIORef v)
       Nothing -> throwErr $ mkDiagnostic line (" at " ++ name) "No such variable"
+varRef _ (Local depth index _) = do
+    env <- getEnvAt depth
+    case env of
+      Nothing -> error "Name resolution error"
+      Just env' ->
+          let arr = values env'
+           in pure $ VarRef (liftIO' (readArray arr index)) (liftIO' . writeArray arr index)
 
 lookupVar :: Int -> ResolvedName -> Eval Value
 lookupVar line resolved = do
     ref <- varRef line resolved
-    liftIO' $ readIORef ref
+    readRef ref
 
 assignVar :: Int -> ResolvedName -> Value -> Eval ()
 assignVar line resolved val = do
     ref <- varRef line resolved
-    liftIO' $ val `seq` writeIORef ref val
+    val `seq` writeRef ref val
 
-exec :: Env -> [Stmt ResolvedName] -> IO (EvalResult ())
-exec env stmts = runEval (execProgram stmts) $ EvalContext env env
+exec :: GlobalEnv -> [Stmt ResolvedName] -> IO (EvalResult ())
+exec env stmts = runEval (execProgram stmts) $ EvalContext env Nothing
 
 execProgram :: [Stmt ResolvedName] -> Eval ()
 execProgram []     = pure ()
@@ -139,11 +152,11 @@ execStmt (ExprStmt  _line expr) = eval expr >> pure ()
 execStmt (VarDecl _line name expr) = do
     val <- traverse eval expr
     defineVar name $ fromMaybe VNil val
-execStmt (FunDecl _line name params body) = do
+execStmt (FunDecl _line name params body nvars) = do
     env <- getEnv
     u <- liftIO' newUnique
-    defineVar name (VLochsFunction u env name params body)
-execStmt (Block _line stmts) = newScope (execProgram stmts)
+    defineVar name (VLochsFunction u env (Just name) params body nvars)
+execStmt (Block _line stmts nvars) = newScope nvars (execProgram stmts)
 execStmt (IfStmt _line cond cons alt) = do
     val <- eval cond
     if isTruthy val
@@ -169,8 +182,8 @@ callNative FClock _ = liftIO' getMonotonicTime >>= pure . VNumber
 
 call' :: Callable -> [Value] -> Eval Value
 call' (NativeFunction _ funId) args = callNative funId args
-call' (LochsFunction _ env params body) args = do
-    withEnv env . newScope $ do
+call' (LochsFunction _ env params body nvars) args = do
+    (maybe id withEnv env) . (newScope nvars) $ do
         traverse_ (uncurry defineVar) (zip params args)
         observe (execProgram body) >>= \case
             Ok _     -> pure VNil
@@ -189,8 +202,8 @@ call line callable args
 ensureCallable :: Int -> Value -> Eval Callable
 ensureCallable _ (VNativeFunction funId) =
     pure $ NativeFunction (nativeFunctionArity funId) funId
-ensureCallable _ (VLochsFunction _ env _ params body) =
-    pure $ LochsFunction (length params) env params body
+ensureCallable _ (VLochsFunction _ env _ params body nvars) =
+    pure $ LochsFunction (length params) env params body nvars
 ensureCallable l v                      = typeError l v "function"
 
 hydrate :: LitValue -> Value
@@ -223,10 +236,10 @@ eval = \case
         args' <- traverse eval args
         fn <- ensureCallable line callee'
         call line fn args'
-    Fun _ params body -> do
+    Fun _ params body nvars -> do
         env <- getEnv
         u <- liftIO' newUnique
-        pure $ VLochsFunction u env "?" params body
+        pure $ VLochsFunction u env Nothing params body nvars
 
 runtimeError :: Int -> String -> Eval a
 runtimeError line message = throwErr $ mkDiagnostic line "" message
