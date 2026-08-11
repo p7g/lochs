@@ -1,11 +1,13 @@
 module Lochs.AST
     ( AssignTarget(..)
     , BinaryOp(..)
+    , Expr(..)
     , LitValue(..)
     , LogicalOp(..)
-    , Expr(..)
+    , ResolvedName(..)
     , Stmt(..)
     , UnaryOp(..)
+    , UnresolvedName(..)
     ) where
 
 data BinaryOp = BinAdd
@@ -35,25 +37,30 @@ data LitValue = LitBool Bool
               | LitNil
               deriving (Show)
 
-data Expr = Binary   { exprLine :: Int, lhs :: !Expr, binOp :: !BinaryOp, rhs :: !Expr }
-          | Logical  { exprLine :: Int, lhs :: !Expr, logicalOp :: !LogicalOp, rhs :: !Expr }
-          | Grouping { exprLine :: Int, expr :: !Expr }
-          | Literal  { exprLine :: Int, value :: !LitValue }
-          | Unary    { exprLine :: Int, unaryOp :: UnaryOp, expr :: !Expr }
-          | Variable { exprLine :: Int, name :: !String }
-          | Assign   { exprLine :: Int, target :: !String, expr :: !Expr }
-          | Call     { exprLine :: Int, callee :: !Expr, arguments :: ![Expr] }
-          | Fun      { exprLine :: Int, funExprParams :: ![String], funExprBody :: ![Stmt] }
-          deriving (Show)
+data UnresolvedName = UnresolvedName !String deriving (Show)
+data ResolvedName = Local !Int !String | Global !String deriving (Show)
 
-data Stmt = ExprStmt     { stmtLine :: Int, stmtExpr :: !Expr }
-          | PrintStmt    { stmtLine :: Int, stmtExpr :: !Expr }
-          | VarDecl      { stmtLine :: Int, varName :: !String, init :: !(Maybe Expr) }
-          | FunDecl      { stmtLine :: Int, funName :: !String, params :: ![String], funBody :: ![Stmt] }
-          | Block        { stmtLine :: Int, stmts :: ![Stmt] }
-          | IfStmt       { stmtLine :: Int, cond :: !Expr, cons :: !Stmt, alt :: !(Maybe Stmt) }
-          | WhileStmt    { stmtLine :: Int, cond :: !Expr, body :: !Stmt }
-          | BreakStmt    { stmtLine :: Int }
-          | ContinueStmt { stmtLine :: Int }
-          | ReturnStmt   { stmtLine :: Int, returnExpr :: !(Maybe Expr) }
-          deriving (Show)
+data Expr a
+    = Binary   { exprLine :: !Int, lhs :: !(Expr a), binOp :: !BinaryOp, rhs :: !(Expr a) }
+    | Logical  { exprLine :: !Int, lhs :: !(Expr a), logicalOp :: !LogicalOp, rhs :: !(Expr a) }
+    | Grouping { exprLine :: !Int, expr :: !(Expr a) }
+    | Literal  { exprLine :: !Int, value :: !LitValue }
+    | Unary    { exprLine :: !Int, unaryOp :: UnaryOp, expr :: !(Expr a) }
+    | Variable { exprLine :: !Int, name :: !a }
+    | Assign   { exprLine :: !Int, target :: !a, expr :: !(Expr a) }
+    | Call     { exprLine :: !Int, callee :: !(Expr a), arguments :: ![(Expr a)] }
+    | Fun      { exprLine :: !Int, funExprParams :: ![String], funExprBody :: ![Stmt a] }
+    deriving (Show)
+
+data Stmt a
+    = ExprStmt     { stmtLine :: !Int, stmtExpr :: !(Expr a) }
+    | PrintStmt    { stmtLine :: !Int, stmtExpr :: !(Expr a) }
+    | VarDecl      { stmtLine :: !Int, varName :: !String, init :: !(Maybe (Expr a)) }
+    | FunDecl      { stmtLine :: !Int, funName :: !String, params :: ![String], funBody :: ![Stmt a] }
+    | Block        { stmtLine :: !Int, stmts :: ![Stmt a] }
+    | IfStmt       { stmtLine :: !Int, cond :: !(Expr a), cons :: !(Stmt a), alt :: !(Maybe (Stmt a)) }
+    | WhileStmt    { stmtLine :: !Int, cond :: !(Expr a), body :: !(Stmt a) }
+    | BreakStmt    { stmtLine :: !Int }
+    | ContinueStmt { stmtLine :: !Int }
+    | ReturnStmt   { stmtLine :: !Int, returnExpr :: !(Maybe (Expr a)) }
+    deriving (Show)

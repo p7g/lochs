@@ -19,6 +19,7 @@ executable lochs
                     , Lochs.Diagnostic
                     , Lochs.Eval
                     , Lochs.Parser
+                    , Lochs.Resolver
                     , Lochs.Runtime
                     , Lochs.Scanner
     build-depends:    base ^>=4.22.0.0

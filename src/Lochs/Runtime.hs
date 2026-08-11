@@ -6,7 +6,7 @@ import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Unique (Unique)
 
-import Lochs.AST (Stmt)
+import Lochs.AST (ResolvedName, Stmt)
 
 data Env = Env
     { values :: IORef (Map.Map String (IORef Value))
@@ -18,7 +18,7 @@ data Value = VBool   !Bool
            | VString !String
            | VNil
            | VNativeFunction !NativeFunctionID
-           | VLochsFunction Unique Env String ![String] ![Stmt]
+           | VLochsFunction Unique Env String ![String] ![Stmt ResolvedName]
 
 instance Eq Value where
     (VBool a) == (VBool b) = a == b
@@ -36,7 +36,7 @@ nativeFunctionArity :: NativeFunctionID -> Int
 nativeFunctionArity FClock = 0
 
 data Callable = NativeFunction { arity :: !Int, funId :: NativeFunctionID }
-              | LochsFunction  { arity :: !Int, env :: !Env, params :: ![String], body :: ![Stmt] }
+              | LochsFunction  { arity :: !Int, env :: !Env, params :: ![String], body :: ![Stmt ResolvedName] }
 
 instance Show NativeFunctionID where
     show = \case

@@ -2,69 +2,56 @@ module Lochs.Parser (ParseResult(..), parse) where
 
 import Control.Monad (ap, guard, when)
 
-import Lochs.AST
+import Lochs.AST hiding (Stmt, Expr)
+import Lochs.AST qualified as AST
 import Lochs.Diagnostic hiding (line)
 import Lochs.Scanner
+
+type Stmt = AST.Stmt UnresolvedName
+type Expr = AST.Expr UnresolvedName
 
 data ParseResult a = Failure   [Diagnostic] [Token]
                    | Success a [Diagnostic] [Token]
 
 parse :: [Token] -> ([Stmt], [Diagnostic])
-parse ts = case runParser program ts [] (Context False False) of
+parse ts = case runParser program ts [] of
     Success stmts ds _ -> (stmts, ds)
     Failure ds _       -> ([], ds)
 
-data Context = Context { contextInLoop :: Bool, contextInFunction :: Bool }
-
 newtype Parser a = Parser
-    { runParser :: [Token] -> [Diagnostic] -> Context -> ParseResult a }
+    { runParser :: [Token] -> [Diagnostic] -> ParseResult a }
 
 instance Functor Parser where
-    fmap f p = Parser $ \cs ds ctx ->
-        case runParser p cs ds ctx of
+    fmap f p = Parser $ \cs ds ->
+        case runParser p cs ds of
           Failure   ds' cs' -> Failure ds' cs'
           Success x ds' cs' -> Success (f x) ds' cs'
 
 instance Applicative Parser where
-    pure x = Parser $ \cs ds _ -> Success x ds cs
+    pure x = Parser $ \cs ds -> Success x ds cs
     (<*>) = ap
 
 instance Monad Parser where
-    p >>= f = Parser $ \cs ds ctx ->
-        case runParser p cs ds ctx of
+    p >>= f = Parser $ \cs ds ->
+        case runParser p cs ds of
           Failure   ds' cs' -> Failure ds' cs'
-          Success a ds' cs' -> runParser (f a) cs' ds' ctx
+          Success a ds' cs' -> runParser (f a) cs' ds'
 
 instance MonadFail Parser where
     fail s = parseError 0 "" ("Internal parser error: " ++ s)
 
 catchError :: Parser a -> Parser a -> Parser a
-p `catchError` recovery = Parser $ \cs ds ctx ->
-    case runParser p cs ds ctx of
-      Failure ds' cs' -> runParser recovery cs' ds' ctx
+p `catchError` recovery = Parser $ \cs ds ->
+    case runParser p cs ds of
+      Failure ds' cs' -> runParser recovery cs' ds'
       success         -> success
 
-inLoop :: Parser Bool
-inLoop = Parser $ \cs ds ctx -> Success (contextInLoop ctx) ds cs
-
-inFunction :: Parser Bool
-inFunction = Parser $ \cs ds ctx -> Success (contextInFunction ctx) ds cs
-
-modifyContext :: (Context -> Context) -> Parser a -> Parser a
-modifyContext f p = Parser $ \cs ds ctx -> runParser p cs ds (f ctx)
-
-enterLoop :: Parser a -> Parser a
-enterLoop p = modifyContext (\ctx -> ctx { contextInLoop = True }) p
-
-enterFunction :: Parser a -> Parser a
-enterFunction p = modifyContext (\ctx -> ctx { contextInFunction = True }) p
-
 parseError :: Int -> String -> String -> Parser a
-parseError line loc message = Parser $ \cs ds _ ->
+parseError line loc message = Parser $ \cs ds ->
     Failure (ds ++ [mkDiagnostic line loc message]) cs
 
 addDiagnostic :: Int -> String -> String -> Parser ()
-addDiagnostic line loc message = Parser $ \cs ds _ -> Success () (ds ++ [diag]) cs
+addDiagnostic line loc message = Parser $ \cs ds -> Success () (ds ++ [diag]) cs
     where diag = mkDiagnostic line loc message
 
 unexpectedToken :: Token -> Either TokenType String -> Parser a
@@ -77,12 +64,12 @@ unexpectedToken got expected = parseError (line got) loc message
             Right s -> s
 
 item :: Parser Token
-item = Parser $ \cs ds _ -> case cs of
+item = Parser $ \cs ds -> case cs of
     []   -> Failure (ds ++ [mkDiagnostic 0 " at end" "Expected token"]) []
     c:cs' -> Success c ds cs'
 
 peek :: Parser (Maybe Token)
-peek = Parser $ \cs ds _ -> case cs of
+peek = Parser $ \cs ds -> case cs of
     []  -> Success Nothing  ds []
     t:_ -> Success (Just t) ds cs
 
@@ -171,7 +158,7 @@ funDecl kind = do
     tok <- token TFun
     name <- identifier (kind ++ " name")
     params <- funParams
-    body <- snd <$> enterFunction block
+    (_, body) <- block
     pure $ FunDecl (line tok) name params body
 
 varDecl :: Parser Stmt
@@ -241,7 +228,7 @@ whileStatement = do
     _ <- token TLeftParen
     cond <- expression
     _ <- token TRightParen
-    body <- enterLoop statement
+    body <- statement
     pure $ WhileStmt (line whiletok) cond body
 
 desugarContinue :: Expr -> Stmt -> Stmt
@@ -282,7 +269,7 @@ forStatement = do
         _      -> Just <$> expression
 
     _ <- token TRightParen
-    body <- enterLoop statement >>= \s ->
+    body <- statement >>= \s ->
         case inc of
           Just i -> pure $ Block (stmtLine s) [desugarContinue i s, ExprStmt (exprLine i) i]
           Nothing -> pure s
@@ -295,24 +282,18 @@ forStatement = do
 breakStatement :: Parser Stmt
 breakStatement = do
     tok <- token TBreak
-    l <- inLoop
     _ <- token TSemicolon
-    when (not l) $ addDiagnostic (line tok) "" "Break outside loop"
     pure $ BreakStmt (line tok)
 
 continueStatement :: Parser Stmt
 continueStatement = do
     tok <- token TContinue
-    l <- inLoop
     _ <- token TSemicolon
-    when (not l) $ addDiagnostic (line tok) "" "continue outside loop"
     pure $ ContinueStmt (line tok)
 
 returnStatement :: Parser Stmt
 returnStatement = do
     tok <- token TReturn
-    f <- inFunction
-    when (not f) $ addDiagnostic (line tok) "" "return outside function"
     s <- match [TSemicolon]
     case s of
       Just _ -> pure $ ReturnStmt (line tok) Nothing
@@ -342,7 +323,7 @@ assignment = do
             Variable l n -> pure $ Assign l n value
             _            -> do
                 addDiagnostic (exprLine lhs) "" ("Can't assign to " ++ show lhs)
-                pure $ Assign 0 "dummy" value
+                pure $ Assign 0 (UnresolvedName "dummy") value
 
 type BinaryLike op = Int -> Expr -> op -> Expr -> Expr
 
@@ -434,7 +415,7 @@ primary = peek >>= \case
         TNil          -> item >> pure (Literal l LitNil)
         TNumber n     -> item >> pure (Literal l (LitNumber n))
         TString s     -> item >> pure (Literal l (LitString s))
-        TIdentifier i -> item >> pure (Variable l i)
+        TIdentifier i -> item >> pure (Variable l (UnresolvedName i))
         TFun          -> funExpr
         TLeftParen    -> do
             _ <- token TLeftParen
@@ -448,5 +429,5 @@ funExpr :: Parser Expr
 funExpr = do
     tok <- token TFun
     params <- funParams
-    body <- snd <$> enterFunction block
+    (_, body) <- block
     pure $ Fun (line tok) params body
