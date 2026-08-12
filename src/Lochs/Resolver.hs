@@ -2,6 +2,7 @@ module Lochs.Resolver (resolve) where
 
 import Control.Monad (when)
 import Data.Foldable (traverse_)
+import Data.List (sortOn)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 
@@ -13,7 +14,13 @@ resolve ss =
     let (ss', _, d) = runResolve (traverse resolveStmt ss) [] (Context NoFunction False)
      in (ss', d)
 
-data EnvEntry = EnvEntry { defined :: Bool, index :: Int }
+data EnvEntry = EnvEntry
+    { defined :: Bool
+    , index :: Int
+    , uses :: Int
+    , declLine :: Int
+    }
+
 type EnvMap = Map.Map String EnvEntry
 type Env = [EnvMap]
 
@@ -90,7 +97,7 @@ declare :: Int -> UnresolvedName -> Resolve ()
 declare line (UnresolvedName name) = do
     env <- getEnv
     checkExisting line name env
-    modifyEnv $ modifyLocal (\m -> Map.insert name (EnvEntry False (Map.size m)) m)
+    modifyEnv $ modifyLocal (\m -> Map.insert name (EnvEntry False (Map.size m) 0 line) m)
 
 define :: UnresolvedName -> Resolve ()
 define (UnresolvedName name) = modifyEnv $ modifyLocal (Map.adjust (\e -> e { defined = True }) name)
@@ -117,6 +124,28 @@ lookupName line (UnresolvedName name) = do
             Just (depth, index) -> Local depth index name
             Nothing -> Global name
 
+trackUse :: ResolvedName -> Resolve ()
+trackUse (Global _) = pure ()
+trackUse (Local depth _ name) = modifyEnv $ \env ->
+    let (pre, ms) = splitAt depth env
+     in case ms of
+          [] -> error "name resolution error"
+          m:post ->
+              let m' = Map.adjust (\e -> e { uses = uses e + 1 }) name m
+                  env' = pre ++ (m':post)
+               in env'
+
+reportUnused :: Resolve ()
+reportUnused = do
+    env <- getEnv
+    case env of
+      [] -> error "internal compiler error"
+      m:_ ->
+          let unused = sortOn (declLine . snd) [(k, v) | (k, v) <- Map.toList m, uses v == 0]
+              report name entry =
+                  diag $ mkDiagnostic (declLine entry) "" ("Unused variable " ++ name)
+           in traverse_ (uncurry report) unused
+
 resolveFun :: Int -> FunctionType -> [UnresolvedName] -> [Stmt UnresolvedName]
            -> Resolve ([Stmt ResolvedName], Int, [ResolvedName])
 resolveFun line ty params body = do
@@ -127,6 +156,8 @@ resolveFun line ty params body = do
         traverse resolveStmt body
     nvars <- scopeSize
     params' <- traverse (lookupName line) params
+    traverse_ trackUse params' -- don't error for unused params
+    reportUnused
     exitScope
     pure (body', nvars, params')
 
@@ -177,7 +208,10 @@ resolveExpr = \case
     Grouping l e    -> Grouping l <$> resolveExpr e
     Literal l v     -> pure $ Literal l v
     Unary l o e     -> Unary l o <$> resolveExpr e
-    Variable l n    -> Variable l <$> lookupName l n
+    Variable l n    -> do
+        n' <- lookupName l n
+        trackUse n'
+        pure $ Variable l n'
     Assign l n e    -> Assign l <$> lookupName l n <*> resolveExpr e
     Call l c a      -> Call l <$> resolveExpr c <*> traverse resolveExpr a
     Fun l p b _     -> do

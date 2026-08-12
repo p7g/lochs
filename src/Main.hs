@@ -45,11 +45,11 @@ run env code = do
        then do
           let (stmts, diags') = parse tokens
           traverse_ (putStrLn . show) diags'
-          if null diags
+          if null diags'
              then do
                  let (stmts', diags'') = resolve stmts
                  traverse_ (putStrLn . show) diags''
-                 if null diags
+                 if null diags''
                     then exec env stmts' >>= \case
                             Err d    -> putStrLn (show d) >> pure True
                             Ok ()    -> pure False
