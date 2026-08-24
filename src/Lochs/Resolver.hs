@@ -169,6 +169,7 @@ resolveStmt = \case
         enterScope
         s' <- traverse resolveStmt s
         nvars <- scopeSize
+        reportUnused
         exitScope
         pure $ Block l s' nvars
     IfStmt l c t e  -> IfStmt l <$> resolveExpr c <*> resolveStmt t <*> traverse resolveStmt e
