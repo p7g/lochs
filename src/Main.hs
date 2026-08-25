@@ -51,11 +51,11 @@ run env code = do
                  traverse_ (putStrLn . show) diags''
                  if null diags''
                     then exec env stmts' >>= \case
-                            Err d    -> putStrLn (show d) >> pure True
-                            Ok ()    -> pure False
-                            Return _ -> error "Unreachable: return outside function"
-                            Break    -> error "Unreachable: break outside loop"
-                            Continue -> error "Unreachable: continue outside loop"
+                            Ok ()            -> pure False
+                            Abort (Err d)    -> putStrLn (show d) >> pure True
+                            Abort (Return _) -> error "Unreachable: return outside function"
+                            Abort Break      -> error "Unreachable: break outside loop"
+                            Abort Continue   -> error "Unreachable: continue outside loop"
                     else pure True
              else pure True
         else pure True

@@ -17,10 +17,13 @@ newtype Scope     = Scope (IOArray Int Value)
 newtype LocalEnv  = LocalEnv (DA.Array Scope)
 
 data Value = VBool   Bool
-           | VNumber Double
+           | VNumber {-# UNPACK #-} Double
            | VString String
            | VNil
-           | VNativeFunction NativeFunctionID
+           | VNativeFunction
+               { funId :: NativeFunctionID
+               , arity :: Int
+               }
            | VLochsFunction
                { unique :: Unique
                , closure :: LocalEnv
@@ -28,6 +31,7 @@ data Value = VBool   Bool
                , funParams :: [ResolvedName]
                , funBody :: [Stmt ResolvedName]
                , numVars :: Int
+               , arity :: Int
                }
 
 instance Eq Value where
@@ -35,24 +39,15 @@ instance Eq Value where
     (VNumber a) == (VNumber b) = a == b
     (VString a) == (VString b) = a == b
     VNil == VNil = True
-    (VNativeFunction a) == (VNativeFunction b) = a == b
-    (VLochsFunction a _ _ _ _ _) == (VLochsFunction b _ _ _ _ _) = a == b
+    (VNativeFunction a _) == (VNativeFunction b _) = a == b
+    (VLochsFunction a _ _ _ _ _ _) == (VLochsFunction b _ _ _ _ _ _) = a == b
     _ == _ = False
 
 data NativeFunctionID = FClock
                       deriving (Eq)
 
-nativeFunctionArity :: NativeFunctionID -> Int
-nativeFunctionArity FClock = 0
-
-data Callable = NativeFunction { arity :: Int, funId :: NativeFunctionID }
-              | LochsFunction
-                  { arity :: Int
-                  , env :: LocalEnv
-                  , params :: [ResolvedName]
-                  , body :: [Stmt ResolvedName]
-                  , funVars :: Int
-                  }
+nativeFunction :: NativeFunctionID -> Value
+nativeFunction FClock = VNativeFunction FClock 0
 
 instance Show NativeFunctionID where
     show = \case
@@ -64,8 +59,8 @@ instance Show Value where
         VNumber n -> show n
         VString s -> s
         VNil      -> "nil"
-        VNativeFunction f -> "<fn " ++ show f ++ ">"
-        VLochsFunction _ _ name _ _ _ ->
+        VNativeFunction f _ -> "<fn " ++ show f ++ ">"
+        VLochsFunction _ _ name _ _ _ _ ->
             "<fn " ++ fromMaybe "<anon>" (resolvedNameText <$> name) ++ ">"
 
 typeName :: Value -> String
@@ -74,8 +69,8 @@ typeName = \case
     VNumber _ -> "number"
     VString _ -> "string"
     VNil      -> "nil"
-    VNativeFunction _ -> "function"
-    VLochsFunction _ _ _ _ _ _ -> "function"
+    VNativeFunction _ _ -> "function"
+    VLochsFunction _ _ _ _ _ _ _ -> "function"
 
 stringify :: Value -> String
 stringify = \case

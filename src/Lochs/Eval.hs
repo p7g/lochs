@@ -1,11 +1,10 @@
 {-# LANGUAGE Strict #-}
 
-module Lochs.Eval (EvalResult(..), GlobalEnv, exec, mkEnv) where
+module Lochs.Eval (Abort(..), EvalResult(..), GlobalEnv, exec, mkEnv) where
 
-import Control.Monad (ap, when)
+import Control.Monad (when)
 import Data.Array.Dynamic.L qualified as DA
-import Data.Array.MArray (newArray_, readArray, writeArray)
-import Data.Foldable (traverse_)
+import Data.Array.Base (unsafeNewArray_, unsafeRead, unsafeWrite)
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
@@ -16,22 +15,22 @@ import Lochs.AST
 import Lochs.Diagnostic
 import Lochs.Runtime
 
+data Abort = Break
+           | Continue
+           | Return Value
+           | Err Diagnostic
+
 data EvalResult a = Ok a
-                  | Break
-                  | Continue
-                  | Return Value
-                  | Err Diagnostic
+                  | Abort Abort
 
 instance Functor EvalResult where
+    {-# INLINE fmap #-}
     fmap f = \case
-        Ok a     -> Ok (f a)
-        Break    -> Break
-        Continue -> Continue
-        Return v -> Return v
-        Err d    -> Err d
+        Ok a    -> Ok (f a)
+        Abort a -> Abort a
 
 initialEnv :: [(String, Value)]
-initialEnv = [("clock", VNativeFunction FClock)]
+initialEnv = [("clock", nativeFunction FClock)]
 
 mkEnv :: IO GlobalEnv
 mkEnv = do
@@ -47,37 +46,46 @@ data EvalContext = EvalContext
 newtype Eval a = Eval { runEval :: EvalContext -> IO (EvalResult a) }
 
 instance Functor Eval where
+    {-# INLINE fmap #-}
     fmap f (Eval g) = Eval $ \ctx -> fmap (fmap f) (g ctx)
 
 instance Applicative Eval where
+    {-# INLINE pure #-}
     pure x = Eval $ \_ -> pure (Ok x)
-    (<*>) = ap
+    {-# INLINE (<*>) #-}
+    Eval mf <*> Eval ma = Eval $ \ctx -> do
+        rf <- mf ctx
+        case rf of
+          Ok f -> do
+              ra <- ma ctx
+              case ra of
+                Ok a    -> pure $ Ok (f a)
+                Abort a -> pure $ Abort a
+          Abort a -> pure $ Abort a
 
 instance Monad Eval where
+    {-# INLINE (>>=) #-}
     Eval g >>= f = Eval $ \ctx ->
         g ctx >>= \case
-            Ok a     -> runEval (f a) ctx
-            Break    -> pure Break
-            Continue -> pure Continue
-            Return v -> pure (Return v)
-            Err d    -> pure (Err d)
+            Ok a    -> runEval (f a) ctx
+            Abort a -> pure $ Abort a
 
 liftIO' :: IO a -> Eval a
 liftIO' io = Eval $ \_ -> Ok <$> io
 
 throwErr :: Diagnostic -> Eval a
-throwErr d = Eval $ \_ -> pure (Err d)
+throwErr d = Eval $ \_ -> pure $ Abort (Err d)
 
 observe :: Eval a -> Eval (EvalResult a)
 observe (Eval g) = Eval $ \ctx -> do
     result <- g ctx
     pure (Ok result)
 
-reraise :: EvalResult a -> Eval a
-reraise r = Eval $ \_ -> pure r
+reraise :: Abort -> Eval a
+reraise r = Eval $ \_ -> pure $ Abort r
 
 lochsReturn :: Value -> Eval a
-lochsReturn v = Eval $ \_ -> pure (Return v)
+lochsReturn v = Eval $ \_ -> pure $ Abort (Return v)
 
 getEnv :: Eval LocalEnv
 getEnv = Eval $ \ctx -> pure (Ok $ ctxLocalEnv ctx)
@@ -101,14 +109,23 @@ copyEnv (LocalEnv scopes) = liftIO' $ do
     pure $ LocalEnv scopes'
 
 newScope :: Int -> Eval a -> Eval a
+newScope 0 action = action
 newScope nvars action = do
     LocalEnv env <- getEnv
-    arr <- liftIO' $ newArray_ (0, nvars)
+    arr <- liftIO' $ unsafeNewArray_ (0, nvars - 1)
     let scope = Scope arr
     liftIO' $ DA.push env scope
     result <- action
     _ <- liftIO' $ DA.pop env
     pure result
+
+{-# INLINE scopeWrite #-}
+scopeWrite :: Scope -> Int -> Value -> IO ()
+scopeWrite (Scope arr) ix v = unsafeWrite arr ix v
+
+{-# INLINE scopeRead #-}
+scopeRead :: Scope -> Int -> IO Value
+scopeRead (Scope arr) ix = unsafeRead arr ix
 
 defineVar :: ResolvedName -> Value -> Eval ()
 defineVar (Global name) val = do
@@ -116,11 +133,12 @@ defineVar (Global name) val = do
     valCell <- liftIO' $ val `seq` newIORef val
     liftIO' $ modifyIORef env (Map.insert name valCell)
 defineVar (Local depth index _) val = do
-    Scope scope <- getScopeAt depth
-    liftIO' $ writeArray scope index val
+    scope <- getScopeAt depth
+    liftIO' $ scopeWrite scope index val
 
 data VarRef = VarRef { readRef :: Eval Value, writeRef :: Value -> Eval () }
 
+{-# INLINE varRef #-}
 varRef :: Int -> ResolvedName -> Eval VarRef
 varRef line (Global name) = do
     GlobalEnv env <- getGlobalEnv
@@ -129,8 +147,8 @@ varRef line (Global name) = do
       Just v -> pure $ VarRef (liftIO' (readIORef v)) (liftIO' . writeIORef v)
       Nothing -> throwErr $ mkDiagnostic line (" at " ++ name) "No such variable"
 varRef _ (Local depth index _) = do
-    Scope scope <- getScopeAt depth
-    pure $ VarRef (liftIO' (readArray scope index)) (liftIO' . writeArray scope index)
+    scope <- getScopeAt depth
+    pure $ VarRef (liftIO' (scopeRead scope index)) (\val -> liftIO' $ scopeWrite scope index val)
 
 lookupVar :: Int -> ResolvedName -> Eval Value
 lookupVar line resolved = do
@@ -162,7 +180,7 @@ execStmt (VarDecl _line name expr) = do
 execStmt (FunDecl _line name params body nvars) = do
     env <- getEnv >>= copyEnv
     u <- liftIO' newUnique
-    defineVar name (VLochsFunction u env (Just name) params body nvars)
+    defineVar name (VLochsFunction u env (Just name) params body nvars (length params))
 execStmt (Block _line stmts nvars) = newScope nvars (execProgram stmts)
 execStmt (IfStmt _line cond cons alt) = do
     val <- eval cond
@@ -173,45 +191,50 @@ execStmt w@(WhileStmt _line cond body) = do
     val <- eval cond
     when (isTruthy val) $ do
         observe (execStmt body) >>= \case
-            Ok _     -> execStmt w
-            Continue -> execStmt w
-            Break    -> pure ()
-            Return v -> lochsReturn v
-            Err d    -> reraise (Err d)
-execStmt (BreakStmt _)    = Eval $ \_ -> pure Break
-execStmt (ContinueStmt _) = Eval $ \_ -> pure Continue
+            Ok _             -> execStmt w
+            Abort Continue   -> execStmt w
+            Abort Break      -> pure ()
+            Abort (Return v) -> lochsReturn v
+            Abort (Err d)    -> reraise (Err d)
+execStmt (BreakStmt _)    = Eval $ \_ -> pure $ Abort Break
+execStmt (ContinueStmt _) = Eval $ \_ -> pure $ Abort Continue
 execStmt (ReturnStmt _ e) = do
     val <- fromMaybe (pure VNil) $ fmap eval e
     lochsReturn val
 
 callNative :: NativeFunctionID -> [Value] -> Eval Value
-callNative FClock _ = liftIO' getMonotonicTime >>= pure . VNumber
+callNative FClock _ = VNumber <$> liftIO' getMonotonicTime
 
-call' :: Callable -> [Value] -> Eval Value
-call' (NativeFunction _ funId) args = callNative funId args
-call' (LochsFunction _ env params body nvars) args = do
-    (withEnv env) . (newScope nvars) $ do
-        traverse_ (uncurry defineVar) (zip params args)
-        observe (execProgram body) >>= \case
-            Ok _     -> pure VNil
-            Continue -> error "Unreachable: continue crossing function boundary"
-            Break    -> error "Unreachable: break crossing function boundary"
-            Return v -> pure v
-            Err d    -> reraise (Err d)
+arityError :: Int -> Int -> Int -> Eval a
+arityError line expected actual =
+    let message = "Expected " ++ show expected
+            ++ " arguments but got " ++ show actual
+     in runtimeError line message
 
-call :: Int -> Callable -> [Value] -> Eval Value
-call line callable args
-    | length args == arity callable = call' callable args
-    | otherwise                     = runtimeError line message
-        where message = "Expected " ++ show (arity callable)
-                ++ " arguments but got " ++ show (length args)
+declareArgs :: Int -> Int -> [ResolvedName] -> [Value] -> Eval ()
+declareArgs line arity params args = go params args 0
+    where go [] [] _ = pure ()
+          go [] r  p = arityError line arity (p + length r)
+          go _  [] p = arityError line arity p
+          go (p:ps) (a:as) np = do
+              defineVar p a
+              go ps as (np + 1)
 
-ensureCallable :: Int -> Value -> Eval Callable
-ensureCallable _ (VNativeFunction funId) =
-    pure $ NativeFunction (nativeFunctionArity funId) funId
-ensureCallable _ (VLochsFunction _ env _ params body nvars) =
-    pure $ LochsFunction (length params) env params body nvars
-ensureCallable l v                      = typeError l v "function"
+call :: Int -> Value -> [Value] -> Eval Value
+call line (VNativeFunction funId arity) args
+  | length args == arity = callNative funId args
+  | otherwise            = arityError line arity (length args)
+call line (VLochsFunction _ locals _ params body nVars arity) args =
+    (withEnv locals) . (newScope nVars) $ do
+        declareArgs line arity params args
+        result <- observe (execProgram body)
+        case result of
+          Ok _             -> pure VNil
+          Abort Continue   -> error "Unreachable: continue crossing function boundary"
+          Abort Break      -> error "Unreachable: break crossing function boundary"
+          Abort (Return v) -> pure v
+          Abort (Err d)    -> reraise (Err d)
+call line val _ = typeError line val "function"
 
 hydrate :: LitValue -> Value
 hydrate (LitBool b) = VBool b
@@ -241,12 +264,11 @@ eval = \case
     Call line callee args -> do
         callee' <- eval callee
         args' <- traverse eval args
-        fn <- ensureCallable line callee'
-        call line fn args'
+        call line callee' args'
     Fun _ params body nvars -> do
         env <- getEnv >>= copyEnv
         u <- liftIO' newUnique
-        pure $ VLochsFunction u env Nothing params body nvars
+        pure $ VLochsFunction u env Nothing params body nvars (length params)
 
 runtimeError :: Int -> String -> Eval a
 runtimeError line message = throwErr $ mkDiagnostic line "" message

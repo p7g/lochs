@@ -10,7 +10,7 @@ category:           Language
 build-type:         Simple
 
 common warnings
-    ghc-options: -Wall
+    ghc-options: -O2 -Wall -funbox-strict-fields
 
 executable lochs
     import:           warnings
