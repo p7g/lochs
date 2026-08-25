@@ -1,3 +1,5 @@
+{-# LANGUAGE Strict #-}
+
 module Lochs.Eval (EvalResult(..), GlobalEnv, exec, mkEnv) where
 
 import Control.Monad (ap, when)

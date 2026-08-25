@@ -1,3 +1,5 @@
+{-# LANGUAGE Strict #-}
+
 module Lochs.AST
     ( AssignTarget(..)
     , BinaryOp(..)
