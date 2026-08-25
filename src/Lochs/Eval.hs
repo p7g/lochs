@@ -3,6 +3,7 @@
 module Lochs.Eval (EvalResult(..), GlobalEnv, exec, mkEnv) where
 
 import Control.Monad (ap, when)
+import Data.Array.Dynamic.L qualified as DA
 import Data.Array.MArray (newArray_, readArray, writeArray)
 import Data.Foldable (traverse_)
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
@@ -40,7 +41,7 @@ mkEnv = do
 
 data EvalContext = EvalContext
     { ctxGlobalEnv :: GlobalEnv
-    , ctxLocalEnv :: Maybe LocalEnv
+    , ctxLocalEnv  :: LocalEnv
     }
 
 newtype Eval a = Eval { runEval :: EvalContext -> IO (EvalResult a) }
@@ -78,28 +79,36 @@ reraise r = Eval $ \_ -> pure r
 lochsReturn :: Value -> Eval a
 lochsReturn v = Eval $ \_ -> pure (Return v)
 
-getEnv :: Eval (Maybe LocalEnv)
+getEnv :: Eval LocalEnv
 getEnv = Eval $ \ctx -> pure (Ok $ ctxLocalEnv ctx)
 
-getEnvAt :: Int -> Eval (Maybe LocalEnv)
-getEnvAt 0 = getEnv
-getEnvAt n = do
-    p <- (>>= parent) <$> getEnv
-    case p of
-      Nothing -> error "Name resolution error"
-      Just p' -> withEnv p' $ getEnvAt (n - 1)
+getScopeAt :: Int -> Eval Scope
+getScopeAt n = do
+    LocalEnv envs <- getEnv
+    sz <- liftIO' $ DA.size envs
+    liftIO' $ DA.unsafeRead envs (sz - n - 1)
 
 getGlobalEnv :: Eval GlobalEnv
 getGlobalEnv = Eval $ \ctx -> pure (Ok $ ctxGlobalEnv ctx)
 
-withEnv :: LocalEnv -> Eval a -> Eval a
-withEnv env (Eval g) = Eval $ \ctx -> g (ctx { ctxLocalEnv = Just env })
+withEnv :: LocalEnv -> Eval b -> Eval b
+withEnv env (Eval g) = Eval $ \ctx -> g (ctx { ctxLocalEnv = env })
+
+copyEnv :: LocalEnv -> Eval LocalEnv
+copyEnv (LocalEnv scopes) = liftIO' $ do
+    scopes' <- DA.empty
+    DA.for scopes (DA.push scopes')
+    pure $ LocalEnv scopes'
 
 newScope :: Int -> Eval a -> Eval a
 newScope nvars action = do
-    parentEnv <- getEnv
+    LocalEnv env <- getEnv
     arr <- liftIO' $ newArray_ (0, nvars)
-    withEnv (LocalEnv arr parentEnv) action
+    let scope = Scope arr
+    liftIO' $ DA.push env scope
+    result <- action
+    _ <- liftIO' $ DA.pop env
+    pure result
 
 defineVar :: ResolvedName -> Value -> Eval ()
 defineVar (Global name) val = do
@@ -107,10 +116,8 @@ defineVar (Global name) val = do
     valCell <- liftIO' $ val `seq` newIORef val
     liftIO' $ modifyIORef env (Map.insert name valCell)
 defineVar (Local depth index _) val = do
-    env <- getEnvAt depth
-    case env of
-      Nothing -> error "Name resolution error"
-      Just env' -> liftIO' $ writeArray (values env') index val
+    Scope scope <- getScopeAt depth
+    liftIO' $ writeArray scope index val
 
 data VarRef = VarRef { readRef :: Eval Value, writeRef :: Value -> Eval () }
 
@@ -122,12 +129,8 @@ varRef line (Global name) = do
       Just v -> pure $ VarRef (liftIO' (readIORef v)) (liftIO' . writeIORef v)
       Nothing -> throwErr $ mkDiagnostic line (" at " ++ name) "No such variable"
 varRef _ (Local depth index _) = do
-    env <- getEnvAt depth
-    case env of
-      Nothing -> error "Name resolution error"
-      Just env' ->
-          let arr = values env'
-           in pure $ VarRef (liftIO' (readArray arr index)) (liftIO' . writeArray arr index)
+    Scope scope <- getScopeAt depth
+    pure $ VarRef (liftIO' (readArray scope index)) (liftIO' . writeArray scope index)
 
 lookupVar :: Int -> ResolvedName -> Eval Value
 lookupVar line resolved = do
@@ -140,7 +143,9 @@ assignVar line resolved val = do
     val `seq` writeRef ref val
 
 exec :: GlobalEnv -> [Stmt ResolvedName] -> IO (EvalResult ())
-exec env stmts = runEval (execProgram stmts) $ EvalContext env Nothing
+exec global stmts = do
+    localEnvs <- LocalEnv <$> DA.empty
+    runEval (execProgram stmts) $ EvalContext global localEnvs
 
 execProgram :: [Stmt ResolvedName] -> Eval ()
 execProgram []     = pure ()
@@ -155,7 +160,7 @@ execStmt (VarDecl _line name expr) = do
     val <- traverse eval expr
     defineVar name $ fromMaybe VNil val
 execStmt (FunDecl _line name params body nvars) = do
-    env <- getEnv
+    env <- getEnv >>= copyEnv
     u <- liftIO' newUnique
     defineVar name (VLochsFunction u env (Just name) params body nvars)
 execStmt (Block _line stmts nvars) = newScope nvars (execProgram stmts)
@@ -185,7 +190,7 @@ callNative FClock _ = liftIO' getMonotonicTime >>= pure . VNumber
 call' :: Callable -> [Value] -> Eval Value
 call' (NativeFunction _ funId) args = callNative funId args
 call' (LochsFunction _ env params body nvars) args = do
-    (maybe id withEnv env) . (newScope nvars) $ do
+    (withEnv env) . (newScope nvars) $ do
         traverse_ (uncurry defineVar) (zip params args)
         observe (execProgram body) >>= \case
             Ok _     -> pure VNil
@@ -239,7 +244,7 @@ eval = \case
         fn <- ensureCallable line callee'
         call line fn args'
     Fun _ params body nvars -> do
-        env <- getEnv
+        env <- getEnv >>= copyEnv
         u <- liftIO' newUnique
         pure $ VLochsFunction u env Nothing params body nvars
 

@@ -1,5 +1,8 @@
+{-# LANGUAGE Strict #-}
+
 module Lochs.Runtime where
 
+import Data.Array.Dynamic.L qualified as DA
 import Data.Array.IO (IOArray)
 import Data.IORef (IORef)
 import Data.List (stripPrefix)
@@ -10,11 +13,8 @@ import Data.Unique (Unique)
 import Lochs.AST (ResolvedName, Stmt, resolvedNameText)
 
 newtype GlobalEnv = GlobalEnv (IORef (Map.Map String (IORef Value)))
-
-data LocalEnv = LocalEnv
-    { values :: IOArray Int Value
-    , parent :: Maybe LocalEnv
-    }
+newtype Scope     = Scope (IOArray Int Value)
+newtype LocalEnv  = LocalEnv (DA.Array Scope)
 
 data Value = VBool   !Bool
            | VNumber !Double
@@ -23,7 +23,7 @@ data Value = VBool   !Bool
            | VNativeFunction !NativeFunctionID
            | VLochsFunction
                { unique :: !Unique
-               , closure :: !(Maybe LocalEnv)
+               , closure :: !LocalEnv
                , name :: !(Maybe ResolvedName)
                , funParams :: ![ResolvedName]
                , funBody :: ![Stmt ResolvedName]
@@ -48,7 +48,7 @@ nativeFunctionArity FClock = 0
 data Callable = NativeFunction { arity :: !Int, funId :: NativeFunctionID }
               | LochsFunction
                   { arity :: !Int
-                  , env :: !(Maybe LocalEnv)
+                  , env :: !LocalEnv
                   , params :: ![ResolvedName]
                   , body :: ![Stmt ResolvedName]
                   , funVars :: !Int
