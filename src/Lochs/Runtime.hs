@@ -16,18 +16,18 @@ newtype GlobalEnv = GlobalEnv (IORef (Map.Map String (IORef Value)))
 newtype Scope     = Scope (IOArray Int Value)
 newtype LocalEnv  = LocalEnv (DA.Array Scope)
 
-data Value = VBool   !Bool
-           | VNumber !Double
-           | VString !String
+data Value = VBool   Bool
+           | VNumber Double
+           | VString String
            | VNil
-           | VNativeFunction !NativeFunctionID
+           | VNativeFunction NativeFunctionID
            | VLochsFunction
-               { unique :: !Unique
-               , closure :: !LocalEnv
-               , name :: !(Maybe ResolvedName)
-               , funParams :: ![ResolvedName]
-               , funBody :: ![Stmt ResolvedName]
-               , numVars :: !Int
+               { unique :: Unique
+               , closure :: LocalEnv
+               , name :: Maybe ResolvedName
+               , funParams :: [ResolvedName]
+               , funBody :: [Stmt ResolvedName]
+               , numVars :: Int
                }
 
 instance Eq Value where
@@ -45,13 +45,13 @@ data NativeFunctionID = FClock
 nativeFunctionArity :: NativeFunctionID -> Int
 nativeFunctionArity FClock = 0
 
-data Callable = NativeFunction { arity :: !Int, funId :: NativeFunctionID }
+data Callable = NativeFunction { arity :: Int, funId :: NativeFunctionID }
               | LochsFunction
-                  { arity :: !Int
-                  , env :: !LocalEnv
-                  , params :: ![ResolvedName]
-                  , body :: ![Stmt ResolvedName]
-                  , funVars :: !Int
+                  { arity :: Int
+                  , env :: LocalEnv
+                  , params :: [ResolvedName]
+                  , body :: [Stmt ResolvedName]
+                  , funVars :: Int
                   }
 
 instance Show NativeFunctionID where
