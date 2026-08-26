@@ -1,16 +1,16 @@
-{-# LANGUAGE Strict #-}
+{-# LANGUAGE Strict, MagicHash #-}
 
 module Lochs.Runtime where
 
 import Data.Array.Dynamic.L qualified as DA
-import Data.Array.IO (IOArray)
+import GHC.Exts (MutableArray#, RealWorld)
 import Data.List (stripPrefix)
 import Data.Maybe (fromMaybe)
 import Data.Unique (Unique)
 
 import Lochs.AST (ResolvedName, resolvedNameText)
 
-newtype Scope     = Scope (IOArray Int Value)
+data    Scope     = Scope (MutableArray# RealWorld Value)
 newtype LocalEnv  = LocalEnv (DA.Array Scope)
 
 data Flow = Normal
@@ -33,7 +33,7 @@ data Value = VBool   Bool
                }
            | VLochsFunction
                { unique :: Unique
-               , closure :: LocalEnv
+               , closure :: {-# NOUNPACK #-} LocalEnv
                , name :: Maybe ResolvedName
                , funParams :: [ResolvedName]
                , funBody :: StmtC

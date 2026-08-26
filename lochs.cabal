@@ -24,7 +24,6 @@ executable lochs
                     , Lochs.Scanner
     build-depends:    base ^>=4.20.0.0
                     , containers
-                    , array
                     , dynamic-array
     hs-source-dirs:   src
     default-language: GHC2024

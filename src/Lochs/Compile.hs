@@ -1,10 +1,11 @@
-{-# LANGUAGE Strict #-}
+{-# LANGUAGE Strict, MagicHash, UnboxedTuples #-}
 
 module Lochs.Compile (GlobalEnv, Program, compile, exec, mkEnv) where
 
 import Control.Exception (Exception, throwIO, try)
-import Data.Array.Base (unsafeNewArray_, unsafeRead, unsafeWrite)
 import Data.Array.Dynamic.L qualified as DA
+import GHC.Exts (Int (I#), newArray#, readArray#, writeArray#)
+import GHC.IO (IO (IO))
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map qualified as Map
 import Data.Unique (newUnique)
@@ -92,18 +93,18 @@ defineGlobal = writeIORef
 
 defineLocal :: EvalContext -> Int -> Int -> Value -> IO ()
 defineLocal ctx depth index val = do
-    Scope arr <- getScopeAt ctx depth
-    val `seq` unsafeWrite arr index val
+    scope <- getScopeAt ctx depth
+    val `seq` writeSlot scope index val
 
 lookupLocal :: Int -> Int -> EvalContext -> IO Value
 lookupLocal depth ix ctx = do
-    Scope arr <- getScopeAt ctx depth
-    unsafeRead arr ix
+    scope <- getScopeAt ctx depth
+    readSlot scope ix
 
 assignLocal :: EvalContext -> Int -> Int -> Value -> IO ()
 assignLocal ctx depth ix val = do
-    Scope arr <- getScopeAt ctx depth
-    val `seq` unsafeWrite arr ix val
+    scope <- getScopeAt ctx depth
+    val `seq` writeSlot scope ix val
 
 copyEnv :: LocalEnv -> IO LocalEnv
 copyEnv (LocalEnv scopes) = do
@@ -112,7 +113,16 @@ copyEnv (LocalEnv scopes) = do
     pure $ LocalEnv scopes'
 
 newScope :: Int -> IO Scope
-newScope nvars = Scope <$> unsafeNewArray_ (0, nvars - 1)
+newScope (I# nvars) = IO $ \s ->
+    case newArray# nvars VUninit s of
+      (# s', arr #) -> (# s', Scope arr #)
+
+readSlot :: Scope -> Int -> IO Value
+readSlot (Scope arr) (I# ix) = IO (readArray# arr ix)
+
+writeSlot :: Scope -> Int -> Value -> IO ()
+writeSlot (Scope arr) (I# ix) val = IO $ \s ->
+    case writeArray# arr ix val s of s' -> (# s', () #)
 
 pushScope :: EvalContext -> Scope -> IO ()
 pushScope ctx scope = do
@@ -220,8 +230,15 @@ compileStmt globals = \case
         case expr of
         Just expr' -> do
             exprC <- compileExpr globals expr'
-            pure $ \ctx -> exprC ctx >>= pure . Return
+            pure $ \ctx -> exprC ctx >>= \v -> pure $! Return v
         Nothing -> pure $ \_ -> pure (Return VNil)
+
+vTrue, vFalse :: Value
+vTrue = VBool True
+vFalse = VBool False
+
+mkBool :: Bool -> Value
+mkBool b = if b then vTrue else vFalse
 
 hydrate :: LitValue -> Value
 hydrate (LitBool b) = VBool b
@@ -237,11 +254,11 @@ compileExpr globals = \case
     Grouping _ expr -> compileExpr globals expr
     Unary line op expr -> do
         exprC <- compileExpr globals expr
-        pure $ unary line op exprC
+        unary line op exprC
     Binary line l op r -> do
         lC <- compileExpr globals l
         rC <- compileExpr globals r
-        pure $ binary line op lC rC
+        binary line op lC rC
     Logical _ l op r -> do
         lC <- compileExpr globals l
         rC <- compileExpr globals r
@@ -278,15 +295,16 @@ compileExpr globals = \case
             env <- copyEnv (ctxLocal ctx)
             pure $ VLochsFunction u env Nothing params bodyC nvars arity
 
-unary :: Int -> UnaryOp -> ExprC -> ExprC
-unary line UnaryNeg exprC = \ctx ->
+unary :: Int -> UnaryOp -> ExprC -> IO ExprC
+unary line UnaryNeg exprC = pure $ \ctx ->
     exprC ctx >>= \case
-        VNumber n -> pure $ VNumber (-n)
+        VNumber n -> pure $! VNumber (-n)
         other     -> typeError line other "number"
-unary _ UnaryNot exprC = \ctx -> do
+unary _ UnaryNot exprC = pure $ \ctx -> do
     v <- exprC ctx
-    pure $ VBool (not (isTruthy v))
+    pure $! mkBool (not (isTruthy v))
 
+{-# INLINE numBinOp #-}
 numBinOp :: Int -> (Double -> Double -> IO Value) -> ExprC -> ExprC -> ExprC
 numBinOp line op lC rC ctx = do
     l <- lC ctx
@@ -296,34 +314,36 @@ numBinOp line op lC rC ctx = do
       (VNumber _, other) -> typeError line other "number"
       (other, _) -> typeError line other "number"
 
-binary :: Int -> BinaryOp -> ExprC -> ExprC -> ExprC
-binary line BinSub lC rC = numBinOp line (\l r -> pure $ VNumber (l - r)) lC rC
+binary :: Int -> BinaryOp -> ExprC -> ExprC -> IO ExprC
+binary line BinSub lC rC = pure $ \ctx -> numBinOp line (\l r -> pure $! VNumber (l - r)) lC rC ctx
 binary line BinDiv lC rC =
     let div _ 0 = runtimeError line "Division by zero"
-        div l r = pure $ VNumber (l / r)
-     in numBinOp line div lC rC
-binary line BinMul lC rC = numBinOp line (\l r -> pure $ VNumber (l * r)) lC rC
-binary line BinAdd lC rC = \ctx -> do
+        div l r = pure $! VNumber (l / r)
+     in pure $ \ctx -> numBinOp line div lC rC ctx
+binary line BinMul lC rC = pure $ \ctx -> numBinOp line (\l r -> pure $! VNumber (l * r)) lC rC ctx
+binary line BinAdd lC rC = pure $ \ctx -> do
     l <- lC ctx
     r <- rC ctx
-    case (l, r) of
-      (VNumber l', VNumber r') -> pure (VNumber (l' + r'))
-      (VString l', VString r') -> pure (VString (l' ++ r'))
-      (VNumber _, other) -> typeError line other "number"
-      (VString _, other) -> typeError line other "string"
-      (other, _) -> typeError line other "number or string"
-binary line BinGt  lC rC = numBinOp line (\l r -> pure $ VBool (l > r)) lC rC
-binary line BinGte lC rC = numBinOp line (\l r -> pure $ VBool (l >= r)) lC rC
-binary line BinLt  lC rC = numBinOp line (\l r -> pure $ VBool (l < r)) lC rC
-binary line BinLte lC rC = numBinOp line (\l r -> pure $ VBool (l <= r)) lC rC
-binary line BinEq  lC rC = \ctx -> do
+    case l of
+      VNumber l' -> case r of
+          VNumber r' -> pure $! VNumber (l' + r')
+          other      -> typeError line other "number"
+      VString l' -> case r of
+          VString r' -> pure $! VString (l' ++ r')
+          other      -> typeError line other "string"
+      other -> typeError line other "number or string"
+binary line BinGt  lC rC = pure $ \ctx -> numBinOp line (\l r -> pure $! mkBool (l > r)) lC rC ctx
+binary line BinGte lC rC = pure $ \ctx -> numBinOp line (\l r -> pure $! mkBool (l >= r)) lC rC ctx
+binary line BinLt  lC rC = pure $ \ctx -> numBinOp line (\l r -> pure $! mkBool (l < r)) lC rC ctx
+binary line BinLte lC rC = pure $ \ctx -> numBinOp line (\l r -> pure $! mkBool (l <= r)) lC rC ctx
+binary _ BinEq  lC rC = pure $ \ctx -> do
     l <- lC ctx
     r <- rC ctx
-    pure $ VBool (isEqual l r)
-binary line BinNe  lC rC = \ctx -> do
+    pure $! mkBool (isEqual l r)
+binary _ BinNe  lC rC = pure $ \ctx -> do
     l <- lC ctx
     r <- rC ctx
-    pure $ VBool (not (isEqual l r))
+    pure $! mkBool (not (isEqual l r))
 
 arityError :: Int -> Int -> Int -> IO a
 arityError line expected actual =
@@ -347,20 +367,31 @@ declareArgs line arity = go 0
 call :: Int -> ExprC -> [ExprC] -> ExprC
 call line calleeC argsC ctx = do
     callee <- calleeC ctx
-    args <- traverse ($ ctx) argsC
     case callee of
-      VNativeFunction funId arity
-        | length args == arity -> callNative funId args
-        | otherwise            -> arityError line arity (length args)
       VLochsFunction _ env _ params body nvars arity -> do
-          let ctx' = ctx { ctxLocal = env }
           scope <- newScope nvars
+          -- Evaluate each argument in the caller's context and write it
+          -- straight into the callee's scope, so no argument list is built.
+          let go (Local _ ix _ : ps) (a : as) = do
+                  v <- a ctx
+                  v `seq` writeSlot scope ix v
+                  go ps as
+              go [] [] = pure ()
+              go [] r  = arityError line arity (arity + length r)
+              go p  [] = arityError line arity (arity - length p)
+              go _  _  = error "parameter resolved as global"
+          go params argsC
+          let ctx' = ctx { ctxLocal = env }
           pushScope ctx' scope
-          declareArgs line arity params args ctx'
           result <- body ctx'
           popScope ctx'
           case result of
             Normal -> pure VNil
             Return v -> pure v
             _ -> runtimeError line "break/continue escaped from call"
+      VNativeFunction funId arity -> do
+          args <- traverse ($ ctx) argsC
+          if length args == arity
+            then callNative funId args
+            else arityError line arity (length args)
       val -> typeError line val "function"
