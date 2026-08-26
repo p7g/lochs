@@ -7,7 +7,7 @@ import System.Exit (ExitCode(ExitFailure), exitWith)
 import System.IO (hFlush, hPutStrLn, stderr, stdout)
 import System.IO.Error (catchIOError, isEOFError)
 
-import Lochs.Eval
+import Lochs.Compile
 import Lochs.Parser (parse)
 import Lochs.Resolver
 import Lochs.Scanner (scan)
@@ -50,12 +50,9 @@ run env code = do
                  let (stmts', diags'') = resolve stmts
                  traverse_ (putStrLn . show) diags''
                  if null diags''
-                    then exec env stmts' >>= \case
-                            Ok ()            -> pure False
-                            Abort (Err d)    -> putStrLn (show d) >> pure True
-                            Abort (Return _) -> error "Unreachable: return outside function"
-                            Abort Break      -> error "Unreachable: break outside loop"
-                            Abort Continue   -> error "Unreachable: continue outside loop"
+                    then compile env stmts' >>= exec >>= \case
+                            Nothing -> pure False
+                            Just d  -> putStrLn (show d) >> pure True
                     else pure True
              else pure True
         else pure True

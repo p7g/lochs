@@ -4,17 +4,24 @@ module Lochs.Runtime where
 
 import Data.Array.Dynamic.L qualified as DA
 import Data.Array.IO (IOArray)
-import Data.IORef (IORef)
 import Data.List (stripPrefix)
-import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Unique (Unique)
 
-import Lochs.AST (ResolvedName, Stmt, resolvedNameText)
+import Lochs.AST (ResolvedName, resolvedNameText)
 
-newtype GlobalEnv = GlobalEnv (IORef (Map.Map String (IORef Value)))
 newtype Scope     = Scope (IOArray Int Value)
 newtype LocalEnv  = LocalEnv (DA.Array Scope)
+
+data Flow = Normal
+          | Break
+          | Continue
+          | Return Value
+
+newtype EvalContext = EvalContext { ctxLocal  :: LocalEnv }
+
+type ExprC = EvalContext -> IO Value
+type StmtC = EvalContext -> IO Flow
 
 data Value = VBool   Bool
            | VNumber {-# UNPACK #-} Double
@@ -29,10 +36,11 @@ data Value = VBool   Bool
                , closure :: LocalEnv
                , name :: Maybe ResolvedName
                , funParams :: [ResolvedName]
-               , funBody :: [Stmt ResolvedName]
+               , funBody :: StmtC
                , numVars :: Int
                , arity :: Int
                }
+           | VUninit
 
 instance Eq Value where
     (VBool a) == (VBool b) = a == b
@@ -41,6 +49,8 @@ instance Eq Value where
     VNil == VNil = True
     (VNativeFunction a _) == (VNativeFunction b _) = a == b
     (VLochsFunction a _ _ _ _ _ _) == (VLochsFunction b _ _ _ _ _ _) = a == b
+    VUninit == _ = error "uninit in Eq"
+    _ == VUninit = error "uninit in Eq"
     _ == _ = False
 
 data NativeFunctionID = FClock
@@ -62,6 +72,7 @@ instance Show Value where
         VNativeFunction f _ -> "<fn " ++ show f ++ ">"
         VLochsFunction _ _ name _ _ _ _ ->
             "<fn " ++ fromMaybe "<anon>" (resolvedNameText <$> name) ++ ">"
+        VUninit -> "<uninit>"
 
 typeName :: Value -> String
 typeName = \case
@@ -71,6 +82,7 @@ typeName = \case
     VNil      -> "nil"
     VNativeFunction _ _ -> "function"
     VLochsFunction _ _ _ _ _ _ _ -> "function"
+    VUninit -> error "getting type name of uninit"
 
 stringify :: Value -> String
 stringify = \case
@@ -85,6 +97,7 @@ isTruthy :: Value -> Bool
 isTruthy = \case
     VNil    -> False
     VBool v -> v
+    VUninit -> error "truthiness check on uninit"
     _       -> True
 
 isEqual :: Value -> Value -> Bool
