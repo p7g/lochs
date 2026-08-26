@@ -58,8 +58,8 @@ getScopeAt ctx n = do
 
 globalRef :: GlobalEnv -> String -> IO (IORef Value)
 globalRef (GlobalEnv envRef) name = do
-    map <- readIORef envRef
-    case Map.lookup name map of
+    m <- readIORef envRef
+    case Map.lookup name m of
       Just ref -> pure ref
       Nothing -> do
           ref <- newIORef VUninit
@@ -184,7 +184,7 @@ compileStmt globals = \case
         exprC <- maybe (pure (const (pure VNil))) (compileExpr globals) expr
         global <- globalRef globals name
         pure $ \ctx -> exprC ctx >>= defineGlobal global >> pure Normal
-    FunDecl _ resolved@(Local depth ix name) params body nvars -> do
+    FunDecl _ resolved@(Local depth ix _) params body nvars -> do
         bodyC <- compileStmts globals body
         let arity = length params
         pure $ \ctx -> do
@@ -197,7 +197,7 @@ compileStmt globals = \case
         bodyC <- compileStmts globals body
         let arity = length params
         global <- globalRef globals name
-        pure $ \ctx -> do
+        pure $ \_ -> do
             u <- newUnique
             env <- LocalEnv <$> DA.empty
             let val = VLochsFunction u env (Just resolved) params bodyC nvars arity
@@ -224,8 +224,8 @@ compileStmt globals = \case
                         Return v -> pure (Return v)
                 else pure Normal
         pure loop
-    BreakStmt _       -> pure $ \ctx -> pure Break
-    ContinueStmt _    -> pure $ \ctx -> pure Continue
+    BreakStmt _       -> pure $ \_ -> pure Break
+    ContinueStmt _    -> pure $ \_ -> pure Continue
     ReturnStmt _ expr ->
         case expr of
         Just expr' -> do
@@ -250,7 +250,7 @@ compileExpr :: GlobalEnv -> Expr ResolvedName -> IO ExprC
 compileExpr globals = \case
     Literal _ lit ->
         let v = hydrate lit
-        in pure $ \ctx -> pure v
+        in pure $ \_ -> pure v
     Grouping _ expr -> compileExpr globals expr
     Unary line op expr -> do
         exprC <- compileExpr globals expr
@@ -269,7 +269,7 @@ compileExpr globals = \case
     Variable _ (Local depth ix _) -> pure $ lookupLocal depth ix
     Variable line (Global name) -> do
         global <- globalRef globals name
-        pure $ \ctx -> lookupGlobal line name global
+        pure $ \_ -> lookupGlobal line name global
     Assign _ (Local depth ix _) expr -> do
         exprC <- compileExpr globals expr
         pure $ \ctx -> do
@@ -317,9 +317,9 @@ numBinOp line op lC rC ctx = do
 binary :: Int -> BinaryOp -> ExprC -> ExprC -> IO ExprC
 binary line BinSub lC rC = pure $ \ctx -> numBinOp line (\l r -> pure $! VNumber (l - r)) lC rC ctx
 binary line BinDiv lC rC =
-    let div _ 0 = runtimeError line "Division by zero"
-        div l r = pure $! VNumber (l / r)
-     in pure $ \ctx -> numBinOp line div lC rC ctx
+    let safeDiv _ 0 = runtimeError line "Division by zero"
+        safeDiv l r = pure $! VNumber (l / r)
+     in pure $ \ctx -> numBinOp line safeDiv lC rC ctx
 binary line BinMul lC rC = pure $ \ctx -> numBinOp line (\l r -> pure $! VNumber (l * r)) lC rC ctx
 binary line BinAdd lC rC = pure $ \ctx -> do
     l <- lC ctx
@@ -353,16 +353,6 @@ arityError line expected actual =
 
 callNative :: NativeFunctionID -> [Value] -> IO Value
 callNative FClock _ = VNumber <$> getMonotonicTime
-
-declareArgs :: Int -> Int -> [ResolvedName] -> [Value] -> EvalContext -> IO ()
-declareArgs line arity = go 0
-    where go _ [] [] ctx = pure ()
-          go p [] r  ctx = arityError line arity (p + length r)
-          go p _  [] ctx = arityError line arity p
-          go np (Local depth ix _ : ps) (a:as) ctx = do
-              defineLocal ctx depth ix a
-              go (np + 1) ps as ctx
-          go _ _ _ _ = error "parameter resolved as global"
 
 call :: Int -> ExprC -> [ExprC] -> ExprC
 call line calleeC argsC ctx = do
