@@ -10,6 +10,7 @@ import GHC.IO (IO (IO))
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map qualified as Map
+import Data.Text qualified as T
 import Data.Unique (newUnique)
 import GHC.Clock (getMonotonicTime)
 
@@ -302,7 +303,7 @@ mkBool b = if b then vTrue else vFalse
 hydrate :: LitValue -> Value
 hydrate (LitBool b) = VBool b
 hydrate (LitNumber n) = VNumber n
-hydrate (LitString s) = VString s
+hydrate (LitString s) = VString (T.pack s)
 hydrate LitNil = VNil
 
 internAttr :: CompileContext -> String -> IO Int
@@ -442,7 +443,7 @@ binary line BinAdd lC rC = pure $ \ctx -> do
           VNumber r' -> pure $! VNumber (l' + r')
           other      -> typeError line other "number"
       VString l' -> case r of
-          VString r' -> pure $! VString (l' ++ r')
+          VString r' -> pure $! VString (T.append l' r')
           other      -> typeError line other "string"
       other -> typeError line other "number or string"
 binary line BinGt  lC rC = pure $ \ctx -> numBinOp line (\l r -> pure $! mkBool (l > r)) lC rC ctx

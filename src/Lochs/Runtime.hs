@@ -8,6 +8,7 @@ import Data.IORef (IORef)
 import Data.IntMap.Strict (IntMap)
 import Data.List (stripPrefix)
 import Data.Maybe (fromMaybe)
+import Data.Text qualified as T
 import Data.Unique (Unique)
 
 import Lochs.AST (ResolvedName, resolvedNameText)
@@ -40,7 +41,7 @@ instance Show Class where
 
 data Value = VBool   Bool
            | VNumber {-# UNPACK #-} Double
-           | VString String
+           | VString T.Text
            | VNil
            | VNativeFunction
                { funId :: NativeFunctionID
@@ -87,7 +88,7 @@ instance Show Value where
     show = \case
         VBool   b -> if b then "true" else "false"
         VNumber n -> show n
-        VString s -> s
+        VString s -> T.unpack s
         VNil      -> "nil"
         VNativeFunction f _ -> "<fn " ++ show f ++ ">"
         VLochsFunction _ _ name _ _ _ _ _ ->
