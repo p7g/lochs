@@ -6,6 +6,7 @@ module Lochs.AST
     , Expr(..)
     , LitValue(..)
     , LogicalOp(..)
+    , MethodDecl(..)
     , ResolvedName(..)
     , Stmt(..)
     , UnaryOp(..)
@@ -59,6 +60,18 @@ data Expr a
     | Assign   { exprLine :: Int, target :: a, expr :: Expr a }
     | Call     { exprLine :: Int, callee :: Expr a, arguments :: [Expr a] }
     | Fun      { exprLine :: Int, funExprParams :: [a], funExprBody :: [Stmt a], funExprVars :: Int }
+    | GetProp  { exprLine :: Int, object :: Expr a, attrName :: String }
+    | SetProp  { exprLine :: Int, object :: Expr a, attrName :: String, expr :: Expr a }
+    | This     { exprLine :: Int, name :: a }
+    deriving (Show)
+
+data MethodDecl a = MethodDecl
+    { methodLine :: Int
+    , methodName :: String
+    , methodParams :: [a]
+    , methodBody :: [Stmt a]
+    , methodNVars :: Int
+    }
     deriving (Show)
 
 data Stmt a
@@ -66,6 +79,7 @@ data Stmt a
     | PrintStmt    { stmtLine :: Int, stmtExpr :: Expr a }
     | VarDecl      { stmtLine :: Int, varName :: a, init :: Maybe (Expr a) }
     | FunDecl      { stmtLine :: Int, funName :: a, params :: [a], funBody :: [Stmt a], nVars :: Int }
+    | ClassDecl    { stmtLine :: Int, className :: a, methods :: [MethodDecl a] }
     | Block        { stmtLine :: Int, stmts :: [Stmt a], nVars :: Int }
     | IfStmt       { stmtLine :: Int, cond :: Expr a, cons :: Stmt a, alt :: Maybe (Stmt a) }
     | WhileStmt    { stmtLine :: Int, cond :: Expr a, body :: Stmt a }

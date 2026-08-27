@@ -1,17 +1,18 @@
 module Lochs.Resolver (resolve) where
 
-import Control.Monad (when)
+import Control.Monad (forM, when)
 import Data.Foldable (traverse_)
 import Data.List (sortOn)
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 
 import Lochs.AST
 import Lochs.Diagnostic
 
 resolve :: [Stmt UnresolvedName] -> ([Stmt ResolvedName], [Diagnostic])
 resolve ss =
-    let (ss', _, d) = runResolve (traverse resolveStmt ss) [] (Context NoFunction False)
+    let context = Context NoFunction False NoClass
+        (ss', _, d) = runResolve (traverse resolveStmt ss) [] context
      in (ss', d)
 
 data EnvEntry = EnvEntry
@@ -24,12 +25,16 @@ data EnvEntry = EnvEntry
 type EnvMap = Map.Map String EnvEntry
 type Env = [EnvMap]
 
-data FunctionType = Function | NoFunction
+data FunctionType = Function | Method | Initializer | NoFunction
+    deriving (Eq)
+
+data ClassType = Class | NoClass
     deriving (Eq)
 
 data Context = Context
     { funType :: FunctionType
     , inLoop :: Bool
+    , classType :: ClassType
     }
 
 newtype Resolve a = Resolve { runResolve :: Env -> Context -> (a, Env, [Diagnostic]) }
@@ -177,17 +182,19 @@ resolveStmt = \case
     BreakStmt l     -> do
         loop <- readContext inLoop
         when (not loop) $
-            diag (mkDiagnostic l "" "break outside loop")
+            diag (mkDiagnostic l "" "'break' outside loop")
         pure $ BreakStmt l
     ContinueStmt l -> do
         loop <- readContext inLoop
         when (not loop) $
-            diag (mkDiagnostic l "" "continue outside loop")
+            diag (mkDiagnostic l "" "'continue' outside loop")
         pure $ ContinueStmt l
     ReturnStmt l e -> do
         f <- readContext funType
         when (f == NoFunction) $
-            diag (mkDiagnostic l "" "Return outside function")
+            diag (mkDiagnostic l "" "'return' outside function")
+        when (f == Initializer && isJust e) $
+            diag (mkDiagnostic l "" "Can't return a value from an initializer")
         ReturnStmt l <$> traverse resolveExpr e
     VarDecl l n e -> do
         declare l n
@@ -201,6 +208,19 @@ resolveStmt = \case
         n' <- lookupName l n
         (b', nvars, p') <- resolveFun l Function p b
         pure $ FunDecl l n' p' b' nvars
+    ClassDecl l n ms -> modifyContext (\_ -> Context NoFunction False Class) $ do
+        declare l n
+        define n
+        n' <- lookupName l n
+        enterScope
+        declare l (UnresolvedName "this")
+        define (UnresolvedName "this")
+        ms' <- forM ms $ \(MethodDecl l' mn p b _) -> do
+            let ft = if mn == "init" then Initializer else Method
+            (b', nvars, p') <- resolveFun l' ft p b
+            pure $ MethodDecl l' mn p' b' nvars
+        exitScope
+        pure $ ClassDecl l n' ms'
 
 resolveExpr :: Expr UnresolvedName -> Resolve (Expr ResolvedName)
 resolveExpr = \case
@@ -218,3 +238,12 @@ resolveExpr = \case
     Fun l p b _     -> do
         (b', nvars, p') <- resolveFun l Function p b
         pure $ Fun l p' b' nvars
+    GetProp l e n   -> GetProp l <$> resolveExpr e <*> pure n
+    SetProp l e n v -> SetProp l <$> resolveExpr e <*> pure n <*> resolveExpr v
+    This l n        -> do
+        cls <- readContext classType
+        when (cls == NoClass) $
+            diag (mkDiagnostic l "" "'this' outside class")
+        n' <- lookupName l n
+        trackUse n'
+        pure $ This l n'

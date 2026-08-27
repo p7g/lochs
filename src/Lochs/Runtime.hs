@@ -4,6 +4,8 @@ module Lochs.Runtime where
 
 import Data.Array.Dynamic.L qualified as DA
 import GHC.Exts (MutableArray#, RealWorld)
+import Data.IORef (IORef)
+import Data.IntMap.Strict (IntMap)
 import Data.List (stripPrefix)
 import Data.Maybe (fromMaybe)
 import Data.Unique (Unique)
@@ -18,10 +20,23 @@ data Flow = Normal
           | Continue
           | Return Value
 
-newtype EvalContext = EvalContext { ctxLocal  :: LocalEnv }
+newtype EvalContext = EvalContext { ctxLocal :: LocalEnv }
 
 type ExprC = EvalContext -> IO Value
 type StmtC = EvalContext -> IO Flow
+
+data Class = Class
+    { classId :: Unique
+    , className :: ResolvedName
+    , classArity :: Int
+    , classMethods :: IntMap Value
+    }
+
+instance Eq Class where
+    Class a _ _ _ == Class b _ _ _ = a == b
+
+instance Show Class where
+    show (Class _ n _ _) = resolvedNameText n
 
 data Value = VBool   Bool
            | VNumber {-# UNPACK #-} Double
@@ -39,8 +54,11 @@ data Value = VBool   Bool
                , funBody :: StmtC
                , numVars :: Int
                , arity :: Int
+               , isInit :: Bool
                }
            | VUninit
+           | VClass Class
+           | VInstance Unique Class (IORef (IntMap Value))
 
 instance Eq Value where
     (VBool a) == (VBool b) = a == b
@@ -48,7 +66,9 @@ instance Eq Value where
     (VString a) == (VString b) = a == b
     VNil == VNil = True
     (VNativeFunction a _) == (VNativeFunction b _) = a == b
-    (VLochsFunction a _ _ _ _ _ _) == (VLochsFunction b _ _ _ _ _ _) = a == b
+    (VLochsFunction a _ _ _ _ _ _ _) == (VLochsFunction b _ _ _ _ _ _ _) = a == b
+    (VClass a) == (VClass b) = a == b
+    (VInstance a _ _) == (VInstance b _ _) = a == b
     VUninit == _ = error "uninit in Eq"
     _ == VUninit = error "uninit in Eq"
     _ == _ = False
@@ -70,9 +90,11 @@ instance Show Value where
         VString s -> s
         VNil      -> "nil"
         VNativeFunction f _ -> "<fn " ++ show f ++ ">"
-        VLochsFunction _ _ name _ _ _ _ ->
+        VLochsFunction _ _ name _ _ _ _ _ ->
             "<fn " ++ fromMaybe "<anon>" (resolvedNameText <$> name) ++ ">"
         VUninit -> "<uninit>"
+        VClass c -> show c
+        VInstance _ c _ -> show c ++ " instance"
 
 typeName :: Value -> String
 typeName = \case
@@ -81,8 +103,10 @@ typeName = \case
     VString _ -> "string"
     VNil      -> "nil"
     VNativeFunction _ _ -> "function"
-    VLochsFunction _ _ _ _ _ _ _ -> "function"
+    VLochsFunction _ _ _ _ _ _ _ _ -> "function"
     VUninit -> error "getting type name of uninit"
+    VClass _ -> "class"
+    VInstance _ c _ -> show c
 
 stringify :: Value -> String
 stringify = \case

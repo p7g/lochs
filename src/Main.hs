@@ -14,19 +14,19 @@ import Lochs.Scanner (scan)
 
 main :: IO ()
 main = getArgs >>= \case
-    [filename] -> mkEnv >>= runFile filename
-    [] -> mkEnv >>= runPrompt
+    [filename] -> mkContext >>= runFile filename
+    [] -> mkContext >>= runPrompt
     _ -> do
         hPutStrLn stderr "Usage: lochs [script]"
         exitWith $ ExitFailure 64
 
-runFile :: String -> GlobalEnv -> IO ()
+runFile :: String -> CompileContext -> IO ()
 runFile file env = do
     code <- readFile file
     hadError <- run env code
     when hadError $ exitWith (ExitFailure 65)
 
-runPrompt :: GlobalEnv -> IO ()
+runPrompt :: CompileContext -> IO ()
 runPrompt env = catchIOError loop handler
     where
         loop = do
@@ -37,7 +37,7 @@ runPrompt env = catchIOError loop handler
             loop
         handler e = if isEOFError e then putStrLn "" else ioError e
 
-run :: GlobalEnv -> String -> IO Bool
+run :: CompileContext -> String -> IO Bool
 run env code = do
     let (tokens, diags) = scan code
     traverse_ (putStrLn . show) diags

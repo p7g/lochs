@@ -1,14 +1,16 @@
 module Lochs.Parser (ParseResult(..), parse) where
 
 import Control.Monad (ap, guard, when)
+import Data.Maybe (fromMaybe)
 
-import Lochs.AST hiding (Stmt, Expr)
+import Lochs.AST hiding (Stmt, Expr, MethodDecl)
 import Lochs.AST qualified as AST
 import Lochs.Diagnostic hiding (line)
 import Lochs.Scanner
 
-type Stmt = AST.Stmt UnresolvedName
-type Expr = AST.Expr UnresolvedName
+type Stmt       = AST.Stmt UnresolvedName
+type Expr       = AST.Expr UnresolvedName
+type MethodDecl = AST.MethodDecl UnresolvedName
 
 data ParseResult a = Failure   [Diagnostic] [Token]
                    | Success a [Diagnostic] [Token]
@@ -131,9 +133,12 @@ declaration = tryDecl `catchError` (synchronize >> pure Nothing)
     where tryDecl = do
             Just tok <- peek
             case ty tok of
-                TVar -> Just <$> varDecl
-                TFun -> Just <$> funDecl "function"
-                _    -> Just <$> statement
+                TVar   -> Just <$> varDecl
+                TFun   -> Just <$> (token TFun >> funDecl "function" mkFunDecl)
+                    where mkFunDecl l n p b nvars =
+                            FunDecl l (UnresolvedName n) p b nvars
+                TClass -> Just <$> classDecl
+                _      -> Just <$> statement
 
 funParams :: Parser [UnresolvedName]
 funParams = token TLeftParen >> loop []
@@ -153,13 +158,14 @@ funParams = token TLeftParen >> loop []
                     Just _ -> loop acc'
                     Nothing -> token TRightParen >> pure (reverse acc')
 
-funDecl :: String -> Parser Stmt
-funDecl kind = do
-    tok <- token TFun
+funDecl :: String -> (Int -> String -> [UnresolvedName] -> [Stmt] -> Int -> a)
+        -> Parser a
+funDecl kind constructor = do
+    l <- (fromMaybe 0 . fmap line) <$> peek
     name <- identifier (kind ++ " name")
     params <- funParams
     (_, body) <- block
-    pure $ FunDecl (line tok) (UnresolvedName name) params body 0
+    pure $ constructor l name params body 0
 
 varDecl :: Parser Stmt
 varDecl = do
@@ -171,6 +177,28 @@ varDecl = do
       Just _  -> fmap Just expression
     _ <- token TSemicolon
     pure $ VarDecl (line tok) (UnresolvedName name) expr
+
+methodDecls :: Parser [MethodDecl]
+methodDecls = go []
+    where go methods = do
+            tok <- peek
+            case tok of
+              Nothing -> parseError 0 " at end" "Expected token"
+              Just tok'
+                | ty tok' == TRightBrace -> pure $ reverse methods
+                | otherwise -> do
+                    m <- funDecl "method" AST.MethodDecl
+                    go (m:methods)
+
+
+classDecl :: Parser Stmt
+classDecl = do
+    tok <- token TClass
+    name <- identifier "identifier"
+    _ <- token TLeftBrace
+    methods <- methodDecls
+    _ <- token TRightBrace
+    pure $ ClassDecl (line tok) (UnresolvedName name) methods
 
 statement :: Parser Stmt
 statement = do
@@ -244,6 +272,7 @@ desugarContinue incr stmt = case stmt of
     ExprStmt _ _      -> stmt
     VarDecl _ _ _     -> stmt
     FunDecl _ _ _ _ _ -> stmt
+    ClassDecl _ _ _   -> stmt
 
 forStatement :: Parser Stmt
 forStatement = do
@@ -320,8 +349,9 @@ assignment = do
       Just _  -> do
           value <- assignment
           case lhs of
-            Variable l n -> pure $ Assign l n value
-            _            -> do
+            Variable l n  -> pure $ Assign l n value
+            GetProp l o n -> pure $ SetProp l o n value
+            _             -> do
                 addDiagnostic (exprLine lhs) "" ("Can't assign to " ++ show lhs)
                 pure $ Assign 0 (UnresolvedName "dummy") value
 
@@ -380,12 +410,16 @@ call :: Parser Expr
 call = primary >>= oneCall
     where
         oneCall callee = do
-            lparen <- match [TLeftParen]
+            lparen <- match [TLeftParen, TDot]
             case lparen of
               Nothing -> pure callee
-              Just tok -> do
-                  args <- arguments []
-                  oneCall (Call (line tok) callee args)
+              Just tok
+                | ty tok == TLeftParen -> do
+                    args <- arguments []
+                    oneCall (Call (line tok) callee args)
+                | otherwise -> do
+                    attr <- identifier "property name"
+                    oneCall (GetProp (line tok) callee attr)
         arguments acc = do
             maybeRparen <- peek
             case maybeRparen of
@@ -416,6 +450,7 @@ primary = peek >>= \case
         TNumber n     -> item >> pure (Literal l (LitNumber n))
         TString s     -> item >> pure (Literal l (LitString s))
         TIdentifier i -> item >> pure (Variable l (UnresolvedName i))
+        TThis         -> item >> pure (This l (UnresolvedName "this"))
         TFun          -> funExpr
         TLeftParen    -> do
             _ <- token TLeftParen

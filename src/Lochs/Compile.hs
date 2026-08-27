@@ -1,12 +1,14 @@
 {-# LANGUAGE Strict, MagicHash, UnboxedTuples #-}
 
-module Lochs.Compile (GlobalEnv, Program, compile, exec, mkEnv) where
+module Lochs.Compile (CompileContext, Program, compile, exec, mkContext) where
 
 import Control.Exception (Exception, throwIO, try)
+import Control.Monad (forM, forM_, void, when)
 import Data.Array.Dynamic.L qualified as DA
 import GHC.Exts (Int (I#), newArray#, readArray#, writeArray#)
 import GHC.IO (IO (IO))
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IntMap.Strict qualified as IntMap
 import Data.Map qualified as Map
 import Data.Unique (newUnique)
 import GHC.Clock (getMonotonicTime)
@@ -24,18 +26,24 @@ instance Exception LochsError
 instance Show LochsError where
     show (LochsError d) = show d
 
-compile :: GlobalEnv -> [Stmt ResolvedName] -> IO Program
-compile globals stmts = Program <$> compileStmts globals stmts
+compile :: CompileContext -> [Stmt ResolvedName] -> IO Program
+compile cctx stmts = Program <$> compileStmts cctx stmts
 
 exec :: Program -> IO (Maybe Diagnostic)
 exec (Program f) = do
-    ctx <- newContext
-    r <- try @LochsError (f ctx)
+    cctx <- newContext
+    r <- try @LochsError (f cctx)
     pure $ case r of
              Left (LochsError d) -> Just d
              Right _           -> Nothing
 
 newtype GlobalEnv = GlobalEnv (IORef (Map.Map String (IORef Value)))
+
+data CompileContext = CompileContext
+    { globalEnv :: GlobalEnv
+    , attrTable :: IORef (Map.Map String Int)
+    , nextAttr :: IORef Int
+    }
 
 initialEnv :: [(String, Value)]
 initialEnv = [("clock", nativeFunction FClock)]
@@ -44,6 +52,13 @@ mkEnv :: IO GlobalEnv
 mkEnv = do
     m <- Map.fromList <$> traverse (traverse newIORef) initialEnv
     GlobalEnv <$> newIORef m
+
+mkContext :: IO CompileContext
+mkContext = do
+    env <- mkEnv
+    attrs <- newIORef Map.empty
+    attrCount <- newIORef 0
+    pure $ CompileContext env attrs attrCount
 
 newContext :: IO EvalContext
 newContext = do
@@ -124,22 +139,17 @@ writeSlot :: Scope -> Int -> Value -> IO ()
 writeSlot (Scope arr) (I# ix) val = IO $ \s ->
     case writeArray# arr ix val s of s' -> (# s', () #)
 
-pushScope :: EvalContext -> Scope -> IO ()
-pushScope ctx scope = do
-    let LocalEnv arr = ctxLocal ctx
-    DA.push arr scope
+pushScope :: LocalEnv -> Scope -> IO ()
+pushScope (LocalEnv arr) scope = DA.push arr scope
 
-popScope :: EvalContext -> IO ()
-popScope ctx = do
-    let LocalEnv arr = ctxLocal ctx
-    _ <- DA.pop arr
-    pure ()
+popScope :: LocalEnv -> IO ()
+popScope (LocalEnv arr) = void $! DA.pop arr
 
 withScope :: Scope -> StmtC -> StmtC
 withScope scope action ctx = do
-    pushScope ctx scope
+    pushScope (ctxLocal ctx) scope
     result <- action ctx
-    popScope ctx
+    popScope (ctxLocal ctx)
     pure result
 
 withNewScope :: Int -> StmtC -> StmtC
@@ -166,52 +176,101 @@ runtimeError :: Int -> String -> IO a
 runtimeError line message = throwIO $ LochsError diag
     where diag = mkDiagnostic line "" message
 
-compileStmts :: GlobalEnv -> [Stmt ResolvedName] -> IO StmtC
-compileStmts globals stmts = seqStmts <$> traverse (compileStmt globals) stmts
+compileStmts :: CompileContext -> [Stmt ResolvedName] -> IO StmtC
+compileStmts cctx stmts = seqStmts <$> traverse (compileStmt cctx) stmts
 
-compileStmt :: GlobalEnv -> Stmt ResolvedName -> IO StmtC
-compileStmt globals = \case
+compileStmt :: CompileContext -> Stmt ResolvedName -> IO StmtC
+compileStmt cctx = \case
     PrintStmt _ expr -> do
-        exprC <- compileExpr globals expr
+        exprC <- compileExpr cctx expr
         pure $ \ctx -> exprC ctx >>= putStrLn . stringify >> pure Normal
     ExprStmt _ expr -> do
-        exprC <- compileExpr globals expr
+        exprC <- compileExpr cctx expr
         pure $ \ctx -> exprC ctx >> pure Normal
     VarDecl _ (Local depth ix _) expr -> do
-        exprC <- maybe (pure (const (pure VNil))) (compileExpr globals) expr
+        exprC <- maybe (pure (const (pure VNil))) (compileExpr cctx) expr
         pure $ \ctx -> exprC ctx >>= defineLocal ctx depth ix >> pure Normal
     VarDecl _ (Global name) expr -> do
-        exprC <- maybe (pure (const (pure VNil))) (compileExpr globals) expr
-        global <- globalRef globals name
+        exprC <- maybe (pure (const (pure VNil))) (compileExpr cctx) expr
+        global <- globalRef (globalEnv cctx) name
         pure $ \ctx -> exprC ctx >>= defineGlobal global >> pure Normal
     FunDecl _ resolved@(Local depth ix _) params body nvars -> do
-        bodyC <- compileStmts globals body
+        bodyC <- compileStmts cctx body
         let arity = length params
         pure $ \ctx -> do
             u <- newUnique
             env <- copyEnv (ctxLocal ctx)
-            let val = VLochsFunction u env (Just resolved) params bodyC nvars arity
+            let val = VLochsFunction u env (Just resolved) params bodyC nvars arity False
             defineLocal ctx depth ix val
             pure Normal
     FunDecl _ resolved@(Global name) params body nvars -> do
-        bodyC <- compileStmts globals body
+        bodyC <- compileStmts cctx body
         let arity = length params
-        global <- globalRef globals name
+        global <- globalRef (globalEnv cctx) name
         pure $ \_ -> do
             u <- newUnique
             env <- LocalEnv <$> DA.empty
-            let val = VLochsFunction u env (Just resolved) params bodyC nvars arity
+            let val = VLochsFunction u env (Just resolved) params bodyC nvars arity False
             defineGlobal global val
             pure Normal
-    Block _ stmts nvars -> compileStmts globals stmts >>= pure . withNewScope nvars
+    ClassDecl _ resolved@(Local depth ix _) methodDecls -> do
+        arityRef <- newIORef 0
+        compiledMethods <- forM methodDecls $ \(MethodDecl _ n p b nvars) -> do
+            bC <- compileStmts cctx b
+            let arity = length p
+                isInit = n == "init"
+            when isInit $ writeIORef arityRef arity
+            attrId <- internAttr cctx n
+            pure $! (attrId, Just (Global n), p, bC, nvars, arity, isInit)
+
+        clsArity <- readIORef arityRef
+        pure $ \ctx -> do
+            methodsRef <- newIORef IntMap.empty
+
+            forM_ compiledMethods $ \(attrId, n, p, bC, nvars, arity, isInit) -> do
+                env <- copyEnv (ctxLocal ctx)
+                u <- newUnique
+                let val = VLochsFunction u env n p bC nvars arity isInit
+                modifyIORef' methodsRef (IntMap.insert attrId val)
+
+            methods <- readIORef methodsRef
+            u <- newUnique
+            let val = VClass (Class u resolved clsArity methods)
+            defineLocal ctx depth ix val
+            pure Normal
+    ClassDecl _ resolved@(Global name) methodDecls -> do
+        global <- globalRef (globalEnv cctx) name
+        methodsRef <- newIORef IntMap.empty
+        arityRef <- newIORef 0
+
+        forM_ methodDecls $ \(MethodDecl _ n p b nvars) -> do
+            -- methods on global classes have no closure
+            env <- LocalEnv <$> DA.empty
+            u <- newUnique
+            bC <- compileStmts cctx b
+            attrId <- internAttr cctx n
+            let arity = length p
+                isInit = n == "init"
+                f = VLochsFunction u env (Just (Global n)) p bC nvars arity isInit
+            when isInit $ writeIORef arityRef arity
+            modifyIORef' methodsRef (IntMap.insert attrId f)
+
+        arity <- readIORef arityRef
+        methods <- readIORef methodsRef
+        pure $ \_ -> do
+            u <- newUnique
+            let val = VClass (Class u resolved arity methods)
+            defineGlobal global val
+            pure Normal
+    Block _ stmts nvars -> compileStmts cctx stmts >>= pure . withNewScope nvars
     IfStmt _ cond cons alt -> do
-        condC <- compileExpr globals cond
-        consC <- compileStmt globals cons
-        altC  <- maybe (pure (const (pure Normal))) (compileStmt globals) alt
+        condC <- compileExpr cctx cond
+        consC <- compileStmt cctx cons
+        altC  <- maybe (pure (const (pure Normal))) (compileStmt cctx) alt
         pure $ \ctx -> condC ctx >>= \v -> if isTruthy v then consC ctx else altC ctx
     WhileStmt _ cond body -> do
-        condC <- compileExpr globals cond
-        bodyC <- compileStmt globals body
+        condC <- compileExpr cctx cond
+        bodyC <- compileStmt cctx body
         let loop ctx = do
                 val <- condC ctx
                 if (isTruthy val)
@@ -229,7 +288,7 @@ compileStmt globals = \case
     ReturnStmt _ expr ->
         case expr of
         Just expr' -> do
-            exprC <- compileExpr globals expr'
+            exprC <- compileExpr cctx expr'
             pure $ \ctx -> exprC ctx >>= \v -> pure $! Return v
         Nothing -> pure $ \_ -> pure (Return VNil)
 
@@ -246,54 +305,108 @@ hydrate (LitNumber n) = VNumber n
 hydrate (LitString s) = VString s
 hydrate LitNil = VNil
 
-compileExpr :: GlobalEnv -> Expr ResolvedName -> IO ExprC
-compileExpr globals = \case
+internAttr :: CompileContext -> String -> IO Int
+internAttr cctx s = do
+    tbl <- readIORef (attrTable cctx)
+    case Map.lookup s tbl of
+      Just attrId -> pure attrId
+      Nothing -> do
+        attrId <- atomicModifyIORef' (nextAttr cctx) $ \n -> (n + 1, n)
+        writeIORef (attrTable cctx) (Map.insert s attrId tbl)
+        pure attrId
+
+boundMethod :: Int -> Value -> Class -> Int -> IO (Maybe Value)
+boundMethod line obj (Class _ _ _ methods) attrId =
+    case IntMap.lookup attrId methods of
+      Just (VLochsFunction _ env n p b nvars arity isInit) -> do
+          u <- newUnique
+          env' <- copyEnv env
+          scope <- newScope 1
+          writeSlot scope 0 obj -- this
+          pushScope env' scope
+          let f = VLochsFunction u env' n p b nvars arity isInit
+          pure (Just f)
+      Just v  -> typeError line v "function" -- internal error
+      Nothing -> pure Nothing
+
+compileExpr :: CompileContext -> Expr ResolvedName -> IO ExprC
+compileExpr cctx = \case
     Literal _ lit ->
         let v = hydrate lit
         in pure $ \_ -> pure v
-    Grouping _ expr -> compileExpr globals expr
+    Grouping _ expr -> compileExpr cctx expr
     Unary line op expr -> do
-        exprC <- compileExpr globals expr
+        exprC <- compileExpr cctx expr
         unary line op exprC
     Binary line l op r -> do
-        lC <- compileExpr globals l
-        rC <- compileExpr globals r
+        lC <- compileExpr cctx l
+        rC <- compileExpr cctx r
         binary line op lC rC
     Logical _ l op r -> do
-        lC <- compileExpr globals l
-        rC <- compileExpr globals r
+        lC <- compileExpr cctx l
+        rC <- compileExpr cctx r
         let opFun v = case op of
                         LogicalAnd -> isTruthy v
                         LogicalOr  -> not (isTruthy v)
         pure $ \ctx -> lC ctx >>= \v -> if opFun v then rC ctx else pure v
     Variable _ (Local depth ix _) -> pure $ lookupLocal depth ix
     Variable line (Global name) -> do
-        global <- globalRef globals name
+        global <- globalRef (globalEnv cctx) name
         pure $ \_ -> lookupGlobal line name global
     Assign _ (Local depth ix _) expr -> do
-        exprC <- compileExpr globals expr
+        exprC <- compileExpr cctx expr
         pure $ \ctx -> do
             val <- exprC ctx
             assignLocal ctx depth ix val
             pure val
     Assign line (Global name) expr -> do
-        exprC <- compileExpr globals expr
-        global <- globalRef globals name
+        exprC <- compileExpr cctx expr
+        global <- globalRef (globalEnv cctx) name
         pure $ \ctx -> do
             val <- exprC ctx
             assignGlobal line name global val
             pure val
     Call line callee args -> do
-        calleeC <- compileExpr globals callee
-        argsC <- traverse (compileExpr globals) args
-        pure $ call line calleeC argsC
+        calleeC <- compileExpr cctx callee
+        argsC <- traverse (compileExpr cctx) args
+        call cctx line calleeC argsC
     Fun _ params body nvars -> do
-        bodyC <- compileStmts globals body
+        bodyC <- compileStmts cctx body
         let arity = length params
         pure $ \ctx -> do
             u <- newUnique
             env <- copyEnv (ctxLocal ctx)
-            pure $ VLochsFunction u env Nothing params bodyC nvars arity
+            pure $! VLochsFunction u env Nothing params bodyC nvars arity False
+    GetProp line expr attr -> do
+        exprC <- compileExpr cctx expr
+        attrId <- internAttr cctx attr
+        pure $ \ctx -> do
+            obj <- exprC ctx
+            case obj of
+              VInstance _ cls fieldsRef -> do
+                  fields <- readIORef fieldsRef
+                  case IntMap.lookup attrId fields of
+                    Just val -> pure val
+                    Nothing -> do
+                        method <- boundMethod line obj cls attrId
+                        case method of
+                          Just method' -> pure method'
+                          Nothing -> runtimeError line ("Undefined property " ++ attr)
+              _ -> typeError line obj "object"
+    SetProp line expr attr value -> do
+        exprC <- compileExpr cctx expr
+        valueC <- compileExpr cctx value
+        attrId <- internAttr cctx attr
+        pure $ \ctx -> do
+            obj <- exprC ctx
+            case obj of
+              VInstance _ _ fieldsRef -> do
+                  val <- valueC ctx
+                  modifyIORef' fieldsRef (IntMap.insert attrId val)
+                  pure val
+              _ -> typeError line obj "object"
+    This _ (Local depth ix _) -> pure $ lookupLocal depth ix
+    This _ (Global _) -> error "global this"
 
 unary :: Int -> UnaryOp -> ExprC -> IO ExprC
 unary line UnaryNeg exprC = pure $ \ctx ->
@@ -354,34 +467,60 @@ arityError line expected actual =
 callNative :: NativeFunctionID -> [Value] -> IO Value
 callNative FClock _ = VNumber <$> getMonotonicTime
 
-call :: Int -> ExprC -> [ExprC] -> ExprC
-call line calleeC argsC ctx = do
-    callee <- calleeC ctx
-    case callee of
-      VLochsFunction _ env _ params body nvars arity -> do
-          scope <- newScope nvars
-          -- Evaluate each argument in the caller's context and write it
-          -- straight into the callee's scope, so no argument list is built.
-          let go (Local _ ix _ : ps) (a : as) = do
-                  v <- a ctx
-                  v `seq` writeSlot scope ix v
-                  go ps as
-              go [] [] = pure ()
-              go [] r  = arityError line arity (arity + length r)
-              go p  [] = arityError line arity (arity - length p)
-              go _  _  = error "parameter resolved as global"
-          go params argsC
-          let ctx' = ctx { ctxLocal = env }
-          pushScope ctx' scope
-          result <- body ctx'
-          popScope ctx'
-          case result of
-            Normal -> pure VNil
-            Return v -> pure v
-            _ -> runtimeError line "break/continue escaped from call"
-      VNativeFunction funId arity -> do
-          args <- traverse ($ ctx) argsC
-          if length args == arity
-            then callNative funId args
-            else arityError line arity (length args)
-      val -> typeError line val "function"
+lochsCall :: EvalContext -> Int -> LocalEnv -> [ResolvedName] -> StmtC -> Int -> Int -> [ExprC] -> Bool
+          -> IO Value
+lochsCall ctx line env params body nvars arity argsC isInit = do
+    scope <- newScope nvars
+    -- Evaluate each argument in the caller's context and write it
+    -- straight into the callee's scope, so no argument list is built.
+    let go (Local _ ix _ : ps) (a : as) = do
+            v <- a ctx
+            v `seq` writeSlot scope ix v
+            go ps as
+        go [] [] = pure ()
+        go [] r  = arityError line arity (arity + length r)
+        go p  [] = arityError line arity (arity - length p)
+        go _  _  = error "parameter resolved as global"
+    go params argsC
+    pushScope env scope
+    let ctx' = ctx { ctxLocal = env }
+    result <- body ctx'
+    popScope env
+    if isInit
+       then do
+           this <- lookupLocal 0 0 ctx'
+           pure this
+       else case result of
+              Normal -> pure VNil
+              Return v -> pure v
+              _ -> runtimeError line "break/continue escaped from call"
+
+call :: CompileContext -> Int -> ExprC -> [ExprC] -> IO ExprC
+call cctx line calleeC argsC = do
+    initId <- internAttr cctx "init"
+    pure $ \ctx -> do
+        callee <- calleeC ctx
+        case callee of
+          VLochsFunction _ env _ params body nvars arity isInit ->
+              lochsCall ctx line env params body nvars arity argsC isInit
+          VNativeFunction funId arity -> do
+            args <- traverse ($ ctx) argsC
+            if length args == arity
+               then callNative funId args
+               else arityError line arity (length args)
+          VClass c@(Class _ _ arity _) -> do
+            args <- traverse ($ ctx) argsC
+            u <- newUnique
+            d <- newIORef IntMap.empty
+            if length args == arity
+               then do
+                   let obj = VInstance u c d
+                   initMethod <- boundMethod line obj c initId
+                   case initMethod of
+                     Just (VLochsFunction _ env _ params body nvars _ _) ->
+                         void $! lochsCall ctx line env params body nvars arity argsC True
+                     Just v -> typeError line v "function"
+                     Nothing -> pure ()
+                   pure obj
+               else arityError line arity (length args)
+          val -> typeError line val "function"
